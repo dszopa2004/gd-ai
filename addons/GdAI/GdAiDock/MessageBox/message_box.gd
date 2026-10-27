@@ -1,20 +1,23 @@
 @tool
+class_name MessageBox
 extends PanelContainer
 
-@export var _label : RichTextLabel
+@export var label: RichTextLabel
 
-var _pending_text : String
+var _pending_text := ""
+
 
 func _ready() -> void:
-  _label.text = _pending_text
+	label.text = _pending_text
 
 
-func set_message_text(text : String) -> void:
-  _pending_text = text
-  if _label is not null:
-    label.text = text
+func set_message_text(text: String) -> void:
+	_pending_text = text
+	if label != null:
+		label.text = text
 
-func append_message_text(chunk : String) -> void:
-  _pending_text += chunk;
-  if _label is not null:
-    _label.append_text(chunk)
+
+func append_message_text(chunk: String) -> void:
+	_pending_text += chunk
+	if label != null:
+		label.append_text(chunk)
