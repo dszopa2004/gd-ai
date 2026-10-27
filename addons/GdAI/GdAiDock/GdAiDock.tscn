@@ -9,7 +9,7 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("_ChatButton", "_HistoryButton", "_ChatMenu", "_HistoryMenu")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("_ChatButton", "_HistoryButton", "_ChatMenu", "_HistoryMenu", "_UserInputBox", "_SendButton")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -22,6 +22,8 @@ _ChatButton = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/ChatBu
 _HistoryButton = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/HistoryButton")
 _ChatMenu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu")
 _HistoryMenu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu")
+_UserInputBox = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox")
+_SendButton = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/SendButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -66,20 +68,31 @@ layout_mode = 2
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Label" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu" unique_id=777080911]
+[node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu" unique_id=1192591666]
 layout_mode = 1
-anchors_preset = 8
-anchor_left = 0.5
-anchor_top = 0.5
-anchor_right = 0.5
-anchor_bottom = 0.5
-offset_left = -21.0
-offset_top = -11.5
-offset_right = 21.0
-offset_bottom = 11.5
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-text = "CHAT"
+
+[node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer" unique_id=694686530]
+layout_mode = 2
+
+[node name="UserInputContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer" unique_id=677856786]
+layout_mode = 2
+size_flags_vertical = 10
+
+[node name="UserInputBox" type="TextEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1797441289]
+custom_minimum_size = Vector2(0, 35)
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Ask GD AI"
+
+[node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1995942839]
+visible = false
+layout_mode = 2
+text = "Send"
 
 [node name="HistoryMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=6084792]
 visible = false

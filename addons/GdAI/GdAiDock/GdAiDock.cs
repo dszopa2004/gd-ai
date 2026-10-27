@@ -12,11 +12,17 @@ public partial class GdAiDock : Control
 	[Export] private Control _ChatMenu;
 	[Export] private Control _HistoryMenu;
 	
+	[ExportCategory("User Input")]
+	[Export] private TextEdit _UserInputBox;
+	[Export] private Button _SendButton;
+	
 	public override void _Ready()
 	{
-		// Connect the 'Pressed' signal to your method using +=
+		// Connect the 'Pressed' signal to method
 		_ChatButton.Pressed += OnChatButtonPressed;
 		_HistoryButton.Pressed += OnHistoryButtonPressed;
+		
+		_UserInputBox.TextChanged += OnUserInputBoxTextChanged;
 	}
 	
 	private void OnChatButtonPressed()
@@ -29,5 +35,15 @@ public partial class GdAiDock : Control
 	{
 		_HistoryMenu.Visible = true;
 		_ChatMenu.Visible = false;
+	}
+	
+	private void OnUserInputBoxTextChanged()
+	{
+		_SendButton.Visible = true;
+		
+		if (string.IsNullOrWhiteSpace(_UserInputBox.Text))
+		{
+			_SendButton.Visible = false;
+		}
 	}
 }
