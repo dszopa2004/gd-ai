@@ -1,0 +1,56 @@
+[gd_scene format=3 uid="uid://3r2vm17nsyla"]
+
+[ext_resource type="Theme" uid="uid://dtdb15xjl4ij" path="res://addons/GdAI/GdAiDock/dock_theme.tres" id="1_10xtg"]
+[ext_resource type="Script" uid="uid://b6453m1gjihxq" path="res://addons/GdAI/GdAiDock/GdAiDock.cs" id="1_alhcp"]
+[ext_resource type="ButtonGroup" uid="uid://bq7b738xn24jy" path="res://addons/GdAI/GdAiDock/dock_tab_button_group.tres" id="3_svh0w"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dq450"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_bottom_right = 5
+corner_radius_bottom_left = 5
+
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("BackgroundPanelContainer")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_10xtg")
+script = ExtResource("1_alhcp")
+BackgroundPanelContainer = NodePath("BackgroundPanelContainer")
+
+[node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer" unique_id=1002531450]
+layout_mode = 2
+theme_override_constants/separation = 0
+
+[node name="TabButtons" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer" unique_id=1688491837]
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 0
+
+[node name="ChatButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=476013452]
+layout_mode = 2
+toggle_mode = true
+button_pressed = true
+button_group = ExtResource("3_svh0w")
+text = "Chat"
+
+[node name="HistoryButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=611726661]
+layout_mode = 2
+toggle_mode = true
+button_group = ExtResource("3_svh0w")
+text = "History"
+
+[node name="PanelContainer" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer" unique_id=865799881]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_styles/panel = SubResource("StyleBoxFlat_dq450")

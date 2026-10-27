@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="gd-ai"
-config/features=PackedStringArray("4.7", "Forward Plus")
+config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 config/icon="res://icon.svg"
 
 [display]
@@ -22,6 +22,10 @@ window/stretch/aspect="expand"
 [dotnet]
 
 project/assembly_name="gd-ai"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/GdAI/plugin.cfg")
 
 [physics]
 
