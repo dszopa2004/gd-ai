@@ -9,7 +9,7 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("BackgroundPanelContainer")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("_ChatButton", "_HistoryButton", "_ChatMenu", "_HistoryMenu")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -18,7 +18,10 @@ grow_horizontal = 2
 grow_vertical = 2
 theme = ExtResource("1_10xtg")
 script = ExtResource("1_alhcp")
-BackgroundPanelContainer = NodePath("BackgroundPanelContainer")
+_ChatButton = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/ChatButton")
+_HistoryButton = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/HistoryButton")
+_ChatMenu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu")
+_HistoryMenu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -51,7 +54,48 @@ toggle_mode = true
 button_group = ExtResource("3_svh0w")
 text = "History"
 
-[node name="PanelContainer" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer" unique_id=865799881]
+[node name="OutputPanelBackground" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer" unique_id=865799881]
 layout_mode = 2
 size_flags_vertical = 3
 theme_override_styles/panel = SubResource("StyleBoxFlat_dq450")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground" unique_id=1771041038]
+layout_mode = 2
+
+[node name="ChatMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=4841635]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Label" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu" unique_id=777080911]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -21.0
+offset_top = -11.5
+offset_right = 21.0
+offset_bottom = 11.5
+grow_horizontal = 2
+grow_vertical = 2
+text = "CHAT"
+
+[node name="HistoryMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=6084792]
+visible = false
+layout_mode = 2
+
+[node name="Label" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu" unique_id=1449759828]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -34.0
+offset_top = -11.5
+offset_right = 34.0
+offset_bottom = 11.5
+grow_horizontal = 2
+grow_vertical = 2
+text = "HISTORY"
