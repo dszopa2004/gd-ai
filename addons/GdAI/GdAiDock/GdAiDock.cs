@@ -13,6 +13,8 @@ public partial class GdAiDock : Control
 	[Export] private Control _HistoryMenu;
 	
 	[ExportCategory("User Input")]
+	[Export] private ScrollContainer _ChatScroll;
+	[Export] private VBoxContainer _MessageList;
 	[Export] private TextEdit _UserInputBox;
 	[Export] private Button _SendButton;
 	
@@ -25,6 +27,9 @@ public partial class GdAiDock : Control
 		_UserInputBox.TextChanged += OnUserInputBoxTextChanged;
 		_SendButton.Pressed += OnSendButtonPressed;
 		_UserInputBox.GuiInput += OnInputGuiInput;
+		
+		var bar = _ChatScroll.GetVScrollBar();
+		bar.Changed += () => _ChatScroll.ScrollVertical = (int)bar.MaxValue;
 	}
 	
 	private void OnChatButtonPressed()
@@ -74,7 +79,27 @@ public partial class GdAiDock : Control
 		string text = _UserInputBox.Text.Trim();
 		if (text.Length == 0) return;
 		
-		GD.Print($"Sending: {text}");
+		// Show the user's message
+		AddMessage(text, isUser: true);
 		_UserInputBox.Clear();
+		_UserInputBox.GrabFocus();
+		
+		// Create an empty AI message to fill in as the response arrives.
+		MessageBox aiMessage = AddMessage("", isUser: false);
+		
+		// API call goes here, appending to aiMessage as chunks arrive:
+		//aiMessage.AppendText(chunk);
+		aiMessage.SetMessageText("AI response goes here");
+	}
+	
+	private MessageBox AddMessage(string text, bool isUser)
+	{
+		var message = GD.Load<PackedScene>("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
+			.Instantiate<MessageBox>();
+		
+		message.SetMessageText(text);
+		_MessageList.AddChild(message);
+		
+		return message; // keep this to stream into it
 	}
 }

@@ -1,0 +1,25 @@
+[gd_scene format=3 uid="uid://c6payojmgtnws"]
+
+[ext_resource type="Script" uid="uid://p4o7ykys6dn2" path="res://addons/GdAI/GdAiDock/MessageBox/MessageBox.cs" id="1_744v6"]
+
+[node name="MessageBox" type="PanelContainer" unique_id=1986103873 node_paths=PackedStringArray("_Label")]
+anchors_preset = 10
+anchor_right = 1.0
+grow_horizontal = 2
+script = ExtResource("1_744v6")
+_Label = NodePath("MarginContainer/RichTextLabel")
+
+[node name="MarginContainer" type="MarginContainer" parent="." unique_id=568993262]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 6
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 6
+
+[node name="RichTextLabel" type="RichTextLabel" parent="MarginContainer" unique_id=1147252]
+custom_minimum_size = Vector2(0, 30)
+layout_mode = 2
+focus_mode = 2
+bbcode_enabled = true
+fit_content = true
+selection_enabled = true
