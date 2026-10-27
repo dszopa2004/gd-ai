@@ -36,6 +36,7 @@ theme_override_constants/separation = 0
 layout_mode = 2
 size_flags_horizontal = 0
 size_flags_vertical = 0
+theme_override_constants/separation = 0
 
 [node name="ChatButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=476013452]
 layout_mode = 2
