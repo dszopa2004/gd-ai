@@ -23,6 +23,8 @@ public partial class GdAiDock : Control
 		_HistoryButton.Pressed += OnHistoryButtonPressed;
 		
 		_UserInputBox.TextChanged += OnUserInputBoxTextChanged;
+		_SendButton.Pressed += OnSendButtonPressed;
+		_UserInputBox.GuiInput += OnInputGuiInput;
 	}
 	
 	private void OnChatButtonPressed()
@@ -45,5 +47,34 @@ public partial class GdAiDock : Control
 		{
 			_SendButton.Visible = false;
 		}
+	}
+	
+	private void OnInputGuiInput(InputEvent @event)
+	{
+		if (@event is InputEventKey key && key.Pressed && !key.Echo
+			&& (key.Keycode == Key.Enter || key.Keycode == Key.KpEnter))
+		{
+			// Stop TextEdit from handling this key itself.
+			_UserInputBox.AcceptEvent();
+			
+			if (key.ShiftPressed)
+			{
+				_UserInputBox.InsertTextAtCaret("\n");
+			}
+			else
+			{
+				// Fires the same signal a real click would.
+				_SendButton.EmitSignal(BaseButton.SignalName.Pressed);
+			}
+		}
+	}
+	
+	private void OnSendButtonPressed()
+	{
+		string text = _UserInputBox.Text.Trim();
+		if (text.Length == 0) return;
+		
+		GD.Print($"Sending: {text}");
+		_UserInputBox.Clear();
 	}
 }
