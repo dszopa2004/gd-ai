@@ -21,11 +21,13 @@ public partial class GdAiDock : Control
 	
 	private void OnChatButtonPressed()
 	{
-		GD.Print("Viewing Chat");
+		_ChatMenu.Visible = true;
+		_HistoryMenu.Visible = false;
 	}
 	
 	private void OnHistoryButtonPressed()
 	{
-		GD.Print("Viewing History");
+		_HistoryMenu.Visible = true;
+		_ChatMenu.Visible = false;
 	}
 }
