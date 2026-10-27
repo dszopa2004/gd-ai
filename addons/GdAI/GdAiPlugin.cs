@@ -8,9 +8,11 @@ public partial class GdAiPlugin : EditorPlugin
 
 	public override void _EnterTree()
 	{
+		// Instantiate scene
 		var scene = GD.Load<PackedScene>("res://addons/GdAI/GdAiDock/GdAiDock.tscn")
 			.Instantiate<Control>();
 
+		// Add scene as editor dock
 		_dock = new EditorDock();
 		_dock.AddChild(scene);
 		_dock.Title = "GD AI";
@@ -26,7 +28,7 @@ public partial class GdAiPlugin : EditorPlugin
 
 	public override void _ExitTree()
 	{
-		RemoveDock(_dock);
+		RemoveDock(_dock); // Remove GD AI dock on exit tree
 		_dock.QueueFree();
 		_dock = null;
 	}
