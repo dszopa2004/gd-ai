@@ -149,6 +149,10 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+theme_override_constants/margin_left = 5
+theme_override_constants/margin_top = 5
+theme_override_constants/margin_right = 5
+theme_override_constants/margin_bottom = 5
 
 [node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer" unique_id=777099257]
 layout_mode = 2
@@ -164,10 +168,6 @@ size_flags_vertical = 3
 
 [node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer" unique_id=970877459]
 layout_mode = 2
-theme_override_constants/margin_left = 5
-theme_override_constants/margin_top = 5
-theme_override_constants/margin_right = 5
-theme_override_constants/margin_bottom = 5
 
 [node name="NewChatButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer" unique_id=569249112]
 layout_mode = 2
