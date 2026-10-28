@@ -26,6 +26,8 @@ const SPACER_RATIO := 0.25
 const MAX_LINES := 8
 
 var current_chat: Dictionary = {}
+var client: AiClient
+var pending_ai_message: MessageBox
 
 func _ready() -> void:
 	# Tab button signals
@@ -43,6 +45,14 @@ func _ready() -> void:
 
 	new_chat_button.pressed.connect(_on_new_chat_button_pressed)
 	_refresh_history_list()
+	
+	client = AiClient.new()
+	add_child(client)
+	# Prefer an environment variable over hardcoding the key.
+	client.api_key = OS.get_environment("MODEL_API_KEY")
+	client.system_prompt = "You are a helpful assistant inside the Godot editor."
+	client.response_received.connect(_on_ai_response)
+	client.request_failed.connect(_on_ai_error)
 
 
 # Signal for chat button press
@@ -77,7 +87,7 @@ func _on_input_gui_input(event: InputEvent) -> void:
 # Signal to handle send button press
 func _on_send_button_pressed() -> void:
 	var text := user_input_box.text.strip_edges()
-	if text.is_empty():
+	if text.is_empty() or client.busy:
 		return
 	
 	if current_chat.is_empty():
@@ -89,13 +99,25 @@ func _on_send_button_pressed() -> void:
 	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 	
-	var ai_message := add_message("", false)
+	pending_ai_message = add_message("Thinking...", false)
+	client.send(current_chat["messages"])
 
-	# Placeholder until the API is hooked up. When the real response finishes,
-	# call _record_message("assistant", full_text) once.
-	var reply := "AI response goes here"
-	ai_message.set_message_text(reply)
-	_record_message("assistant", reply)
+
+func _on_ai_response(text: String) -> void:
+	pending_ai_message.set_message_text(text)
+	_record_message("assistant", text)
+	pending_ai_message = null
+
+
+func _on_ai_error(message: String) -> void:
+	pending_ai_message.set_message_text("Error: " + message)
+	pending_ai_message = null
+	
+	# Remove the user turn that never got a reply.
+	var messages: Array = current_chat["messages"]
+	if not messages.is_empty() and messages[-1]["role"] == "user":
+		messages.pop_back()
+		ChatStore.save_chat(current_chat)
 
 
 # Helper function to create a message box
