@@ -106,10 +106,12 @@ custom_minimum_size = Vector2(0, 65)
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "Ask GD AI"
+wrap_mode = 1
 
 [node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1995942839]
 visible = false
 layout_mode = 2
+size_flags_vertical = 8
 text = "Send"
 
 [node name="HistoryMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=6084792]

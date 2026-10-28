@@ -18,6 +18,7 @@ extends Control
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
 const BUBBLE_RATIO := 1.0
 const SPACER_RATIO := 0.25
+const MAX_LINES := 8
 
 func _ready() -> void:
 	# Tab button signals
@@ -49,6 +50,7 @@ func _on_history_button_pressed() -> void:
 # Signal for user input in TextEdit
 func _on_user_input_box_text_changed() -> void:
 	send_button.visible = not user_input_box.text.strip_edges().is_empty()
+	_update_input_height.call_deferred()
 
 
 # Signal to detect keyboard input in TextEdit
@@ -76,6 +78,7 @@ func _on_send_button_pressed() -> void:
 	# Show the user's message
 	add_message(text, true)
 	user_input_box.clear()
+	_update_input_height.call_deferred()
 	user_input_box.grab_focus()
 
 	# Create an empty AI message to fill in as the response arrives
@@ -92,16 +95,16 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	message.size_flags_stretch_ratio = BUBBLE_RATIO
 	message.set_message_text(text)
-
+	
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.size_flags_stretch_ratio = SPACER_RATIO
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-
+	
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 0)
-
+	
 	# User: spacer on the left pushes the bubble right. AI: the reverse.
 	if is_user:
 		row.add_child(spacer)
@@ -109,6 +112,12 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 	else:
 		row.add_child(message)
 		row.add_child(spacer)
-
+	
 	message_list.add_child(row)
 	return message # keep this to stream into it
+
+
+func _update_input_height() -> void:
+	var lines := clampi(user_input_box.get_total_visible_line_count(), 1, MAX_LINES)
+	var padding := user_input_box.get_theme_stylebox("normal").get_minimum_size().y
+	user_input_box.custom_minimum_size.y = lines * user_input_box.get_line_height() + padding
