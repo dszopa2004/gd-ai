@@ -55,21 +55,29 @@ cache/0/48/0/scale = 1.0
 bg_color = Color(0.24115604, 0.24115604, 0.24115601, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_qpn6o"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_n7oqs"]
 bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_m3ifx"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_nb2nq"]
 bg_color = Color(0.20511743, 0.20511743, 0.20511743, 1)
