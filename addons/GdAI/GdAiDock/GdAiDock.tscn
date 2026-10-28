@@ -30,7 +30,7 @@ corner_radius_top_right = 10
 corner_radius_bottom_right = 10
 corner_radius_bottom_left = 10
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -47,6 +47,8 @@ chat_scroll = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackgr
 message_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer/MarginContainer/MessageListContainer")
 user_input_box = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox")
 send_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/SendButton")
+history_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/ScrollContainer/ChatHistoryVbox")
+new_chat_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer/NewChatButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -88,7 +90,6 @@ theme_override_styles/panel = SubResource("StyleBoxFlat_dq450")
 layout_mode = 2
 
 [node name="ChatMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=4841635]
-visible = false
 layout_mode = 2
 size_flags_vertical = 3
 
@@ -137,6 +138,7 @@ size_flags_vertical = 8
 text = "Send"
 
 [node name="HistoryMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=6084792]
+visible = false
 layout_mode = 2
 size_flags_vertical = 3
 
