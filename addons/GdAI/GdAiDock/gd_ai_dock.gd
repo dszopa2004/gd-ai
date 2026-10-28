@@ -16,7 +16,8 @@ extends Control
 @export var send_button: Button
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
-
+const BUBBLE_RATIO := 1.0
+const SPACER_RATIO := 0.25
 
 func _ready() -> void:
 	# Tab button signals
@@ -57,7 +58,7 @@ func _on_input_gui_input(event: InputEvent) -> void:
 			and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
 		# Stop TextEdit from handling this key itself
 		user_input_box.accept_event()
-
+		
 		if event.shift_pressed:
 			# Shift+Enter inserts a new line
 			user_input_box.insert_text_at_caret("\n")
@@ -88,6 +89,26 @@ func _on_send_button_pressed() -> void:
 # Helper function to create a message box
 func add_message(text: String, is_user: bool) -> MessageBox:
 	var message: MessageBox = MESSAGE_BOX_SCENE.instantiate()
+	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	message.size_flags_stretch_ratio = BUBBLE_RATIO
 	message.set_message_text(text)
-	message_list.add_child(message)
+
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.size_flags_stretch_ratio = SPACER_RATIO
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 0)
+
+	# User: spacer on the left pushes the bubble right. AI: the reverse.
+	if is_user:
+		row.add_child(spacer)
+		row.add_child(message)
+	else:
+		row.add_child(message)
+		row.add_child(spacer)
+
+	message_list.add_child(row)
 	return message # keep this to stream into it
