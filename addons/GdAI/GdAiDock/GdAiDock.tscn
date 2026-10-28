@@ -4,31 +4,50 @@
 [ext_resource type="Script" uid="uid://d3sqiicqxj1nl" path="res://addons/GdAI/GdAiDock/gd_ai_dock.gd" id="2_svh0w"]
 [ext_resource type="ButtonGroup" uid="uid://bq7b738xn24jy" path="res://addons/GdAI/GdAiDock/dock_tab_button_group.tres" id="3_svh0w"]
 
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_svh0w"]
+bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_qpn6o"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_aqdjh"]
+bg_color = Color(0.24115604, 0.24115604, 0.24115601, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_eu88m"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_5pxkv"]
+bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_xhsuf"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_ul2x5"]
+bg_color = Color(0.24115604, 0.24115604, 0.24115601, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_wn14f"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dq450"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_qpn6o"]
-bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
-corner_radius_top_left = 10
-corner_radius_top_right = 10
-corner_radius_bottom_right = 10
-corner_radius_bottom_left = 10
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_svh0w"]
-bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
-corner_radius_top_left = 10
-corner_radius_top_right = 10
-corner_radius_bottom_right = 10
-corner_radius_bottom_left = 10
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_aqdjh"]
-bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
-corner_radius_top_left = 10
-corner_radius_top_right = 10
-corner_radius_bottom_right = 10
-corner_radius_bottom_left = 10
 
 [node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button")]
 layout_mode = 3
@@ -70,6 +89,10 @@ theme_override_constants/separation = 0
 
 [node name="ChatButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=476013452]
 layout_mode = 2
+theme_override_styles/normal = SubResource("StyleBoxFlat_svh0w")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_qpn6o")
+theme_override_styles/hover = SubResource("StyleBoxFlat_aqdjh")
+theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_eu88m")
 toggle_mode = true
 button_pressed = true
 button_group = ExtResource("3_svh0w")
@@ -77,6 +100,10 @@ text = "Chat"
 
 [node name="HistoryButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=611726661]
 layout_mode = 2
+theme_override_styles/normal = SubResource("StyleBoxFlat_5pxkv")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_xhsuf")
+theme_override_styles/hover = SubResource("StyleBoxFlat_ul2x5")
+theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_wn14f")
 toggle_mode = true
 button_group = ExtResource("3_svh0w")
 text = "History"
@@ -171,7 +198,4 @@ layout_mode = 2
 
 [node name="NewChatButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer" unique_id=569249112]
 layout_mode = 2
-theme_override_styles/normal = SubResource("StyleBoxFlat_qpn6o")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_svh0w")
-theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_aqdjh")
 text = "New Chat"
