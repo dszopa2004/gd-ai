@@ -86,6 +86,7 @@ func _on_send_button_pressed() -> void:
 	add_message(text, true)
 	_record_message("user", text)
 	user_input_box.clear()
+	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 	
 	var ai_message := add_message("", false)
@@ -127,8 +128,10 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 
 func _update_input_height() -> void:
 	var lines := clampi(user_input_box.get_total_visible_line_count(), 1, MAX_LINES)
+	var line_h := user_input_box.get_line_height() \
+		+ user_input_box.get_theme_constant("line_spacing")
 	var padding := user_input_box.get_theme_stylebox("normal").get_minimum_size().y
-	user_input_box.custom_minimum_size.y = lines * user_input_box.get_line_height() + padding
+	user_input_box.custom_minimum_size.y = lines * line_h + padding
 
 
 # Signal for history button press
