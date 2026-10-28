@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://3r2vm17nsyla"]
 
 [ext_resource type="Theme" uid="uid://dtdb15xjl4ij" path="res://addons/GdAI/GdAiDock/dock_theme.tres" id="1_10xtg"]
-[ext_resource type="Script" uid="uid://b6453m1gjihxq" path="res://addons/GdAI/GdAiDock/GdAiDock.cs" id="1_alhcp"]
+[ext_resource type="Script" uid="uid://d3sqiicqxj1nl" path="res://addons/GdAI/GdAiDock/gd_ai_dock.gd" id="2_svh0w"]
 [ext_resource type="ButtonGroup" uid="uid://bq7b738xn24jy" path="res://addons/GdAI/GdAiDock/dock_tab_button_group.tres" id="3_svh0w"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dq450"]
@@ -9,7 +9,7 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("_ChatButton", "_HistoryButton", "_ChatMenu", "_HistoryMenu", "_ChatScroll", "_MessageList", "_UserInputBox", "_SendButton")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -17,15 +17,15 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 theme = ExtResource("1_10xtg")
-script = ExtResource("1_alhcp")
-_ChatButton = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/ChatButton")
-_HistoryButton = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/HistoryButton")
-_ChatMenu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu")
-_HistoryMenu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu")
-_ChatScroll = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer")
-_MessageList = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer/MessageListContainer")
-_UserInputBox = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox")
-_SendButton = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/SendButton")
+script = ExtResource("2_svh0w")
+chat_button = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/ChatButton")
+history_button = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/HistoryButton")
+chat_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu")
+history_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu")
+chat_scroll = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer")
+message_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer/MessageListContainer")
+user_input_box = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox")
+send_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/SendButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -95,7 +95,7 @@ layout_mode = 2
 size_flags_vertical = 8
 
 [node name="UserInputBox" type="TextEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1797441289]
-custom_minimum_size = Vector2(0, 35)
+custom_minimum_size = Vector2(0, 65)
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "Ask GD AI"

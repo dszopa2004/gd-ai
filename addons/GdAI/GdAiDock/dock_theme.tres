@@ -30,26 +30,46 @@ cache/0/18/0/descent = 0.0
 cache/0/18/0/underline_position = 0.0
 cache/0/18/0/underline_thickness = 0.0
 cache/0/18/0/scale = 1.0
+cache/0/28/0/ascent = 0.0
+cache/0/28/0/descent = 0.0
+cache/0/28/0/underline_position = 0.0
+cache/0/28/0/underline_thickness = 0.0
+cache/0/28/0/scale = 1.0
+cache/0/32/0/ascent = 0.0
+cache/0/32/0/descent = 0.0
+cache/0/32/0/underline_position = 0.0
+cache/0/32/0/underline_thickness = 0.0
+cache/0/32/0/scale = 1.0
+cache/0/64/0/ascent = 0.0
+cache/0/64/0/descent = 0.0
+cache/0/64/0/underline_position = 0.0
+cache/0/64/0/underline_thickness = 0.0
+cache/0/64/0/scale = 1.0
+cache/0/48/0/ascent = 0.0
+cache/0/48/0/descent = 0.0
+cache/0/48/0/underline_position = 0.0
+cache/0/48/0/underline_thickness = 0.0
+cache/0/48/0/scale = 1.0
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_svh0w"]
 bg_color = Color(0.24115604, 0.24115604, 0.24115601, 1)
-corner_radius_top_left = 5
-corner_radius_top_right = 5
+corner_radius_top_left = 10
+corner_radius_top_right = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_qpn6o"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
-corner_radius_top_left = 5
-corner_radius_top_right = 5
+corner_radius_top_left = 10
+corner_radius_top_right = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_n7oqs"]
 bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
-corner_radius_top_left = 5
-corner_radius_top_right = 5
+corner_radius_top_left = 10
+corner_radius_top_right = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_m3ifx"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
-corner_radius_top_left = 5
-corner_radius_top_right = 5
+corner_radius_top_left = 10
+corner_radius_top_right = 10
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_nb2nq"]
 bg_color = Color(0.20511743, 0.20511743, 0.20511743, 1)
@@ -59,7 +79,7 @@ corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
 [resource]
-Button/font_sizes/font_size = 18
+Button/font_sizes/font_size = 32
 Button/fonts/font = SubResource("FontFile_svh0w")
 Button/styles/hover = SubResource("StyleBoxFlat_svh0w")
 Button/styles/hover_pressed = SubResource("StyleBoxFlat_qpn6o")
