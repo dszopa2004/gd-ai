@@ -45,7 +45,8 @@ func _ready() -> void:
 
 	new_chat_button.pressed.connect(_on_new_chat_button_pressed)
 	_refresh_history_list()
-	
+
+	# Set up ai client
 	client = AiClient.new()
 	add_child(client)
 	# Prefer an environment variable over hardcoding the key.
@@ -103,12 +104,14 @@ func _on_send_button_pressed() -> void:
 	client.send(current_chat["messages"])
 
 
+# Set ai response message
 func _on_ai_response(text: String) -> void:
 	pending_ai_message.set_message_text(text)
 	_record_message("assistant", text)
 	pending_ai_message = null
 
 
+# Handle error on ai message
 func _on_ai_error(message: String) -> void:
 	pending_ai_message.set_message_text("Error: " + message)
 	pending_ai_message = null
@@ -171,17 +174,20 @@ func _record_message(role: String, content: String) -> void:
 	ChatStore.save_chat(current_chat)
 
 
+# Make title for chat in history
 func _make_title(text: String) -> String:
 	var line := text.split("\n")[0].strip_edges()
 	return line if line.length() <= 40 else line.substr(0, 40) + "…"
 
 
+# Clear message list
 func _clear_message_list() -> void:
 	for child in message_list.get_children():
 		message_list.remove_child(child)
 		child.queue_free()
 
 
+# Create a new chat
 func _on_new_chat_button_pressed() -> void:
 	current_chat = {}
 	_clear_message_list()
@@ -189,6 +195,7 @@ func _on_new_chat_button_pressed() -> void:
 	user_input_box.grab_focus()
 
 
+# Open the chat from the message history
 func _open_chat(id: String) -> void:
 	var chat := ChatStore.load_chat(id)
 	if chat.is_empty():
@@ -200,6 +207,7 @@ func _open_chat(id: String) -> void:
 	_on_chat_button_pressed()
 
 
+# Delete chat
 func _delete_chat(id: String) -> void:
 	ChatStore.delete_chat(id)
 	if current_chat.get("id", "") == id:
@@ -208,11 +216,14 @@ func _delete_chat(id: String) -> void:
 	_refresh_history_list()
 
 
+# Refresh the histor list
 func _refresh_history_list() -> void:
+	# Iterate through history list and remove children
 	for child in history_list.get_children():
 		history_list.remove_child(child)
 		child.queue_free()
 
+	# Restore chats, update displayed text if no chats found
 	var chats := ChatStore.list_chats()
 	if chats.is_empty():
 		var empty := Label.new()
@@ -220,13 +231,16 @@ func _refresh_history_list() -> void:
 		history_list.add_child(empty)
 		return
 
+	# Iterate through chats and add them back to the list
 	for chat in chats:
 		history_list.add_child(_make_history_row(chat))
 
 
+# Makes the history row node
 func _make_history_row(chat: Dictionary) -> HBoxContainer:
-	var row := HBoxContainer.new()
+	var row := HBoxContainer.new() # Create row to store chat button and delete button
 
+	# Create button to open chat
 	var open_button := Button.new()
 	open_button.text = chat["title"]
 	open_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -234,10 +248,12 @@ func _make_history_row(chat: Dictionary) -> HBoxContainer:
 	open_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	open_button.pressed.connect(_open_chat.bind(chat["id"]))
 
+	# Create delete button
 	var delete_button := Button.new()
 	delete_button.text = "✕"
 	delete_button.pressed.connect(_delete_chat.bind(chat["id"]))
 
+	# Add buttons to row and return row node
 	row.add_child(open_button)
 	row.add_child(delete_button)
 	return row
