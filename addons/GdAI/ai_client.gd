@@ -6,7 +6,7 @@ class_name AiClient
 signal response_received(text: String)
 signal request_failed(message: String)
 
-const URL := "https://api.meta.ai/v1/chat/completions"
+const URL := "https://api.meta.ai/v1/chat/completions" # API Url
 
 var api_key := ""
 var model := "muse-spark-1.3"
@@ -18,12 +18,15 @@ var busy := false
 var _http: HTTPRequest
 
 
+# Generate a new HTTP request upon instantiation
 func _ready() -> void:
 	_http = HTTPRequest.new()
 	add_child(_http)
 	_http.request_completed.connect(_on_request_completed)
 
 
+# Sends a message to ai with adjusted settings
+# Throw error if HTTP request could not be started
 func send(messages: Array) -> void:
 	if busy:
 		return
@@ -54,11 +57,13 @@ func send(messages: Array) -> void:
 	busy = true
 
 
+# Cancels the HTTP request
 func cancel() -> void:
 	_http.cancel_request()
 	busy = false
 
 
+# Handles what happens when a request is complete
 func _on_request_completed(result: int, code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
 	busy = false
 
@@ -68,28 +73,34 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
 
+	# If there is an error code, check what the error code was
 	if code != 200:
 		request_failed.emit(_describe_error(code, parsed, headers))
 		return
 
+	# Handle an unexpected response
 	if not parsed is Dictionary:
 		request_failed.emit("Unexpected response from server.")
 		return
 
+	# Get choices from response
 	var choices: Array = parsed.get("choices", [])
 	if choices.is_empty():
 		request_failed.emit("Response had no choices.")
 		return
 
+	# Get the message and send the response message to the dock
 	var content = choices[0].get("message", {}).get("content", "")
 	response_received.emit(content if content is String else str(content))
 
 
+# Describes the error based on error code
 func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 	var message := "HTTP %d" % code
 	if parsed is Dictionary and parsed.get("error") is Dictionary:
 		message = str(parsed["error"].get("message", message))
 
+	# Return the error code reasoning
 	match code:
 		401:
 			return "Invalid or missing API key. (%s)" % message
