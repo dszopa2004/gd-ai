@@ -1,13 +1,13 @@
 [gd_scene format=3 uid="uid://c6payojmgtnws"]
 
-[ext_resource type="Script" uid="uid://p4o7ykys6dn2" path="res://addons/GdAI/GdAiDock/MessageBox/MessageBox.cs" id="1_744v6"]
+[ext_resource type="Script" uid="uid://cen06nl30p5nv" path="res://addons/GdAI/GdAiDock/MessageBox/message_box.gd" id="1_744v6"]
 
-[node name="MessageBox" type="PanelContainer" unique_id=1986103873 node_paths=PackedStringArray("_Label")]
+[node name="MessageBox" type="PanelContainer" unique_id=1986103873 node_paths=PackedStringArray("label")]
 anchors_preset = 10
 anchor_right = 1.0
 grow_horizontal = 2
 script = ExtResource("1_744v6")
-_Label = NodePath("MarginContainer/RichTextLabel")
+label = NodePath("MarginContainer/RichTextLabel")
 
 [node name="MarginContainer" type="MarginContainer" parent="." unique_id=568993262]
 layout_mode = 2
