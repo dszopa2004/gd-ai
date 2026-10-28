@@ -47,6 +47,7 @@ func _ready() -> void:
 
 # Signal for chat button press
 func _on_chat_button_pressed() -> void:
+	chat_button.button_pressed = true
 	chat_menu.visible = true
 	history_menu.visible = false
 
