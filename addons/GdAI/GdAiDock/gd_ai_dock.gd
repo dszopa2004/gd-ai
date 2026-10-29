@@ -59,6 +59,7 @@ func _ready() -> void:
 	client.request_failed.connect(_on_ai_error)
 	client.streaming = true
 	client.stream_updated.connect(_on_ai_stream)
+	client.retry_scheduled.connect(_on_ai_retry)
 	var custom_url := OS.get_environment("MODEL_API_URL").strip_edges()
 	if not custom_url.is_empty():
 		client.api_url = custom_url
@@ -188,6 +189,12 @@ func _on_cancel_requested() -> void:
 	_refresh_send_button()
 	if user_input_box != null:
 		user_input_box.grab_focus()
+
+
+# Show backoff status in the pending bubble until the next attempt streams in.
+func _on_ai_retry(next_attempt: int, total_attempts: int, delay_sec: float) -> void:
+	if pending_ai_message != null and is_instance_valid(pending_ai_message):
+		pending_ai_message.set_message_text("Retrying… (%d/%d, in %.1fs)" % [next_attempt, total_attempts, delay_sec])
 
 
 # Append streamed chunks into the pending bubble as they arrive.
