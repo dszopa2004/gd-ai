@@ -65,7 +65,7 @@ history_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackg
 chat_scroll = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer")
 message_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer/MarginContainer/MessageListContainer")
 user_input_box = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox")
-send_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/SendButton")
+send_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox/SendButton")
 history_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/ScrollContainer/ChatHistoryVbox")
 new_chat_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer/NewChatButton")
 
@@ -158,9 +158,17 @@ size_flags_horizontal = 3
 placeholder_text = "Ask GD AI"
 wrap_mode = 1
 
-[node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1995942839]
-visible = false
-layout_mode = 2
+[node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox" unique_id=1995942839]
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -75.0
+offset_top = -33.0
+grow_horizontal = 0
+grow_vertical = 0
 size_flags_vertical = 8
 text = "Send"
 

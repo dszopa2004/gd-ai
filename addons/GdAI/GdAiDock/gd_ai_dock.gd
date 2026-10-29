@@ -28,6 +28,8 @@ const MAX_LINES := 8
 var current_chat: Dictionary = {}
 var client: AiClient
 var pending_ai_message: MessageBox
+var _send_button_text := "Send"
+var _send_button_tooltip := ""
 
 func _ready() -> void:
 	# Tab button signals
@@ -64,6 +66,10 @@ func _ready() -> void:
 	else:
 		print("[GdAI] MODEL_API_KEY loaded (%s)." % AiClient.fingerprint(raw_key))
 
+	# Remember the send button's scene appearance so cancel mode can restore it.
+	_send_button_text = send_button.text
+	_send_button_tooltip = send_button.tooltip_text
+
 	# Initial input state: hide send until there is text.
 	_on_user_input_box_text_changed()
 	_update_input_height.call_deferred()
@@ -78,35 +84,67 @@ func _on_chat_button_pressed() -> void:
 
 # Signal for user input in TextEdit
 func _on_user_input_box_text_changed() -> void:
+	_refresh_send_button()
+
+
+# The send button doubles as a cancel button while a request is in flight.
+func _refresh_send_button() -> void:
 	if send_button == null or user_input_box == null:
 		return
-	# Hide send when empty or while a request is in flight.
-	var has_text := not user_input_box.text.strip_edges().is_empty()
-	var busy := client != null and client.busy
-	send_button.visible = has_text and not busy
-	send_button.disabled = busy
+	if client != null and client.busy:
+		send_button.visible = true
+		send_button.disabled = false
+		send_button.text = "Cancel"
+		send_button.tooltip_text = "Cancel the in-flight request (Esc)"
+	else:
+		send_button.text = _send_button_text
+		send_button.tooltip_text = _send_button_tooltip
+		send_button.visible = not user_input_box.text.strip_edges().is_empty()
+		send_button.disabled = false
 	_update_input_height.call_deferred()
 
 
 # Signal to detect keyboard input in TextEdit
 func _on_input_gui_input(event: InputEvent) -> void:
 	if event is InputEventKey \
-			and event.pressed and not event.echo \
-			and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
-		# Stop TextEdit from handling this key itself
-		user_input_box.accept_event()
+			and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE:
+			# Esc cancels an in-flight request; otherwise let it propagate.
+			if client != null and client.busy:
+				user_input_box.accept_event()
+				_on_cancel_requested()
+			return
+		if event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER:
+			# Stop TextEdit from handling this key itself
+			user_input_box.accept_event()
 
-		if event.shift_pressed:
-			# Shift+Enter inserts a new line
-			user_input_box.insert_text_at_caret("\n")
-		else:
-			# Enter sends the message
-			_on_send_button_pressed()
+			if event.shift_pressed:
+				# Shift+Enter inserts a new line
+				user_input_box.insert_text_at_caret("\n")
+			else:
+				# Enter sends the message
+				_on_send_button_pressed()
+
+
+# Esc cancels an in-flight request when focus is anywhere else inside the dock.
+func _unhandled_key_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == KEY_ESCAPE \
+			and client != null and client.busy:
+		var focus_owner := get_viewport().gui_get_focus_owner()
+		if focus_owner == null or (focus_owner != self and not is_ancestor_of(focus_owner)):
+			return
+		get_viewport().set_input_as_handled()
+		_on_cancel_requested()
 
 
 # Signal to handle send button press
 func _on_send_button_pressed() -> void:
-	if client == null or client.busy:
+	if client != null and client.busy:
+		# The button is in cancel mode while a request is in flight.
+		_on_cancel_requested()
+		return
+	if client == null:
 		return
 	if user_input_box == null:
 		return
@@ -135,6 +173,21 @@ func _on_send_button_pressed() -> void:
 	_on_user_input_box_text_changed()
 
 
+# Cancel the in-flight request at the user's request (cancel button or Esc).
+func _on_cancel_requested() -> void:
+	if client == null or not client.busy:
+		return
+	client.cancel()
+	if pending_ai_message != null and is_instance_valid(pending_ai_message):
+		pending_ai_message.set_message_text("Request cancelled.")
+	pending_ai_message = null
+
+	# Keep the user's unanswered turn in history so it stays for context or retry.
+	_refresh_send_button()
+	if user_input_box != null:
+		user_input_box.grab_focus()
+
+
 # Set ai response message
 func _on_ai_response(text: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
@@ -151,14 +204,7 @@ func _on_ai_error(message: String) -> void:
 		pending_ai_message.set_message_text("Error: " + message)
 	pending_ai_message = null
 
-	# Remove the user turn that never got a reply.
-	if not current_chat.is_empty() and current_chat.has("messages"):
-		var messages = current_chat["messages"]
-		if messages is Array and not messages.is_empty():
-			var last = messages[-1]
-			if last is Dictionary and str(last.get("role", "")) == "user":
-				messages.pop_back()
-				ChatStore.save_chat(current_chat)
+	# Keep the user's unanswered turn in history so it stays for context or retry.
 	_on_user_input_box_text_changed()
 
 
