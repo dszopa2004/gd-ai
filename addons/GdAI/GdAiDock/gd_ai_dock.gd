@@ -50,10 +50,23 @@ func _ready() -> void:
 	client = AiClient.new()
 	add_child(client)
 	# Prefer an environment variable over hardcoding the key.
-	client.api_key = OS.get_environment("MODEL_API_KEY")
+	var raw_key := OS.get_environment("MODEL_API_KEY")
+	client.api_key = raw_key.strip_edges()
 	client.system_prompt = "You are a helpful assistant inside the Godot editor."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
+	var custom_url := OS.get_environment("MODEL_API_URL").strip_edges()
+	if not custom_url.is_empty():
+		client.api_url = custom_url
+	print("[GdAI] API endpoint: %s" % client.api_url)
+	if client.api_key.is_empty():
+		push_warning("[GdAI] MODEL_API_KEY is empty. Set it and fully relaunch the editor (Cmd+Q).")
+	else:
+		print("[GdAI] MODEL_API_KEY loaded (%s)." % AiClient.fingerprint(raw_key))
+
+	# Initial input state: hide send until there is text.
+	_on_user_input_box_text_changed()
+	_update_input_height.call_deferred()
 
 
 # Signal for chat button press
@@ -65,7 +78,13 @@ func _on_chat_button_pressed() -> void:
 
 # Signal for user input in TextEdit
 func _on_user_input_box_text_changed() -> void:
-	send_button.visible = not user_input_box.text.strip_edges().is_empty()
+	if send_button == null or user_input_box == null:
+		return
+	# Hide send when empty or while a request is in flight.
+	var has_text := not user_input_box.text.strip_edges().is_empty()
+	var busy := client != null and client.busy
+	send_button.visible = has_text and not busy
+	send_button.disabled = busy
 	_update_input_height.call_deferred()
 
 
@@ -76,7 +95,7 @@ func _on_input_gui_input(event: InputEvent) -> void:
 			and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
 		# Stop TextEdit from handling this key itself
 		user_input_box.accept_event()
-		
+
 		if event.shift_pressed:
 			# Shift+Enter inserts a new line
 			user_input_box.insert_text_at_caret("\n")
@@ -87,40 +106,60 @@ func _on_input_gui_input(event: InputEvent) -> void:
 
 # Signal to handle send button press
 func _on_send_button_pressed() -> void:
-	var text := user_input_box.text.strip_edges()
-	if text.is_empty() or client.busy:
+	if client == null or client.busy:
 		return
-	
+	if user_input_box == null:
+		return
+	var text := user_input_box.text.strip_edges()
+	if text.is_empty():
+		return
+
 	if current_chat.is_empty():
 		current_chat = ChatStore.new_chat()
-	
+	if current_chat.is_empty() or not current_chat.has("messages"):
+		return
+	var history: Array = current_chat["messages"]
+	if not history is Array:
+		return
+
 	add_message(text, true)
 	_record_message("user", text)
 	user_input_box.clear()
 	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
-	
+
 	pending_ai_message = add_message("Thinking...", false)
-	client.send(current_chat["messages"])
+	# Refresh send visibility/disabled now that a request is about to start.
+	# client.send sets busy=true on success; update again after in case it failed fast.
+	client.send(history)
+	_on_user_input_box_text_changed()
 
 
 # Set ai response message
 func _on_ai_response(text: String) -> void:
-	pending_ai_message.set_message_text(text)
-	_record_message("assistant", text)
+	if pending_ai_message != null and is_instance_valid(pending_ai_message):
+		pending_ai_message.set_message_text(text)
 	pending_ai_message = null
+	if not current_chat.is_empty() and current_chat.has("messages"):
+		_record_message("assistant", text)
+	_on_user_input_box_text_changed()
 
 
 # Handle error on ai message
 func _on_ai_error(message: String) -> void:
-	pending_ai_message.set_message_text("Error: " + message)
+	if pending_ai_message != null and is_instance_valid(pending_ai_message):
+		pending_ai_message.set_message_text("Error: " + message)
 	pending_ai_message = null
-	
+
 	# Remove the user turn that never got a reply.
-	var messages: Array = current_chat["messages"]
-	if not messages.is_empty() and messages[-1]["role"] == "user":
-		messages.pop_back()
-		ChatStore.save_chat(current_chat)
+	if not current_chat.is_empty() and current_chat.has("messages"):
+		var messages = current_chat["messages"]
+		if messages is Array and not messages.is_empty():
+			var last = messages[-1]
+			if last is Dictionary and str(last.get("role", "")) == "user":
+				messages.pop_back()
+				ChatStore.save_chat(current_chat)
+	_on_user_input_box_text_changed()
 
 
 # Helper function to create a message box
@@ -129,16 +168,16 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	message.size_flags_stretch_ratio = BUBBLE_RATIO
 	message.set_message_text(text)
-	
+
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.size_flags_stretch_ratio = SPACER_RATIO
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	
+
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 0)
-	
+
 	# User: spacer on the left pushes the bubble right. AI: the reverse.
 	if is_user:
 		row.add_child(spacer)
@@ -146,12 +185,14 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 	else:
 		row.add_child(message)
 		row.add_child(spacer)
-	
+
 	message_list.add_child(row)
 	return message # keep this to stream into it
 
 
 func _update_input_height() -> void:
+	if user_input_box == null:
+		return
 	var lines := clampi(user_input_box.get_total_visible_line_count(), 1, MAX_LINES)
 	var line_h := user_input_box.get_line_height() \
 		+ user_input_box.get_theme_constant("line_spacing")
@@ -168,8 +209,13 @@ func _on_history_button_pressed() -> void:
 
 # Append to the current chat and write it to disk
 func _record_message(role: String, content: String) -> void:
-	current_chat["messages"].append({"role": role, "content": content})
-	if role == "user" and current_chat["title"] == "New chat":
+	if current_chat.is_empty() or not current_chat.has("messages"):
+		return
+	var messages = current_chat["messages"]
+	if not messages is Array:
+		return
+	messages.append({"role": role, "content": content})
+	if role == "user" and str(current_chat.get("title", "")) == "New chat":
 		current_chat["title"] = _make_title(content)
 	ChatStore.save_chat(current_chat)
 
@@ -187,30 +233,43 @@ func _clear_message_list() -> void:
 		child.queue_free()
 
 
+func _cancel_pending_request() -> void:
+	if client != null and client.busy:
+		client.cancel()
+	pending_ai_message = null
+
+
 # Create a new chat
 func _on_new_chat_button_pressed() -> void:
+	_cancel_pending_request()
 	current_chat = {}
 	_clear_message_list()
 	_on_chat_button_pressed()
+	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 
 
 # Open the chat from the message history
 func _open_chat(id: String) -> void:
+	_cancel_pending_request()
 	var chat := ChatStore.load_chat(id)
 	if chat.is_empty():
 		return
 	current_chat = chat
 	_clear_message_list()
-	for msg in chat["messages"]:
-		add_message(msg["content"], msg["role"] == "user")
+	var messages = chat.get("messages", [])
+	if messages is Array:
+		for msg in messages:
+			if msg is Dictionary:
+				add_message(str(msg.get("content", "")), str(msg.get("role", "")) == "user")
 	_on_chat_button_pressed()
 
 
 # Delete chat
 func _delete_chat(id: String) -> void:
 	ChatStore.delete_chat(id)
-	if current_chat.get("id", "") == id:
+	if str(current_chat.get("id", "")) == id:
+		_cancel_pending_request()
 		current_chat = {}
 		_clear_message_list()
 	_refresh_history_list()
@@ -242,16 +301,16 @@ func _make_history_row(chat: Dictionary) -> HBoxContainer:
 
 	# Create button to open chat
 	var open_button := Button.new()
-	open_button.text = chat["title"]
+	open_button.text = str(chat.get("title", "Untitled"))
 	open_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	open_button.clip_text = true
 	open_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	open_button.pressed.connect(_open_chat.bind(chat["id"]))
+	open_button.pressed.connect(_open_chat.bind(str(chat.get("id", ""))))
 
 	# Create delete button
 	var delete_button := Button.new()
 	delete_button.text = "✕"
-	delete_button.pressed.connect(_delete_chat.bind(chat["id"]))
+	delete_button.pressed.connect(_delete_chat.bind(str(chat.get("id", ""))))
 
 	# Add buttons to row and return row node
 	row.add_child(open_button)
