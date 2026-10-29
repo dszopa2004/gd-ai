@@ -6,6 +6,7 @@ class_name AiClient
 signal response_received(text: String)
 signal request_failed(message: String)
 signal stream_updated(full_text: String)
+signal retry_scheduled(next_attempt: int, total_attempts: int, delay_sec: float)
 
 const URL := "https://api.meta.ai/v1/chat/completions" # API Url
 
@@ -18,6 +19,9 @@ var busy := false
 var api_url := URL # override (e.g. via MODEL_API_URL) to test another endpoint without editing code
 var streaming := false # when true, send() uses stream:true with chunked SSE append
 var stream_timeout := 120.0 # seconds for the whole streamed request
+var max_retries := 3 # automatic retries for transient failures (429, 5xx, timeouts, network errors)
+var retry_base_delay := 1.0 # seconds; doubles per attempt, plus jitter
+var retry_max_delay := 30.0 # seconds; ceiling for backoff (a Retry-After header can extend past it)
 
 var _http: HTTPRequest
 var _stream_client: HTTPClient
@@ -32,6 +36,10 @@ var _stream_leftover := ""
 var _stream_content := ""
 var _stream_error_bytes := PackedByteArray()
 var _stream_deadline := 0
+var _pending_messages: Array = []
+var _retry_attempt := 0
+var _request_generation := 0
+var _expecting_response := false
 
 
 # Generate a new HTTP request upon instantiation
@@ -64,18 +72,32 @@ func send(messages: Array) -> void:
 	if key.contains(" ") or key.contains("\t") or key.contains("\n") or key.contains("\r"):
 		request_failed.emit("API key contains spaces or line breaks. Re-copy it without quotes or extra characters.")
 		return
+	_pending_messages = messages.duplicate()
+	_retry_attempt = 0
+	_request_generation += 1
+	_start_request()
+
+
+func _start_request() -> void:
+	var key := _sanitize_key(api_key)
+	if key.is_empty():
+		busy = false
+		_expecting_response = false
+		request_failed.emit("No API key set. Set the MODEL_API_KEY environment variable and fully relaunch the editor (Cmd+Q, not just reopen the project).")
+		return
 	if streaming:
-		_send_stream(messages, key)
+		_send_stream(_pending_messages, key)
 		return
 	_ensure_http()
 	if _http == null:
+		busy = false
 		request_failed.emit("HTTP client is not ready.")
 		return
 
 	var payload_messages: Array = []
 	if not system_prompt.is_empty():
 		payload_messages.append({"role": "developer", "content": system_prompt})
-	payload_messages.append_array(messages)
+	payload_messages.append_array(_pending_messages)
 
 	var headers := PackedStringArray([
 		"Authorization: Bearer %s" % key,
@@ -93,8 +115,13 @@ func send(messages: Array) -> void:
 		url = URL
 	var err := _http.request(url, headers, HTTPClient.METHOD_POST, body)
 	if err != OK:
-		request_failed.emit("Could not start request (error %d)." % err)
+		var start_message := "Could not start request (error %d)." % err
+		if _retry_attempt < max_retries:
+			_schedule_retry(_backoff_delay(), start_message)
+		else:
+			request_failed.emit(start_message)
 		return
+	_expecting_response = true
 	busy = true
 
 
@@ -103,11 +130,10 @@ static func _sanitize_key(raw: String) -> String:
 	var key := raw.strip_edges()
 	if key.to_lower().begins_with("bearer "):
 		key = key.substr("bearer ".length()).strip_edges()
-	if key.length() >= 2:
-		var first := key[0]
-		var last := key[key.length() - 1]
-		if (first == '"' and last == '"') or (first == "'" and last == "'"):
-			key = key.substr(1, key.length() - 2).strip_edges()
+	if key.length() >= 2 \
+			and ((key.begins_with('"') and key.ends_with('"')) \
+			or (key.begins_with("'") and key.ends_with("'"))):
+		key = key.substr(1, key.length() - 2).strip_edges()
 	return key
 
 
@@ -124,11 +150,16 @@ static func fingerprint(raw: String) -> String:
 	var key := _sanitize_key(raw)
 	if key.is_empty():
 		return "missing"
-	return "len=%d %s…%s" % [key.length(), key.left(4), key.right(2)]
+	if key.length() <= 6:
+		return "len=%d (too short to fingerprint safely)" % key.length()
+	return "len=%d %s…%s" % [key.length(), key.left(4), key.substr(key.length() - 2)]
 
 
 # Cancels the HTTP request
 func cancel() -> void:
+	_request_generation += 1 # invalidates any scheduled retry
+	_expecting_response = false
+	_pending_messages = []
 	if _http != null:
 		_http.cancel_request()
 	if _streaming_active:
@@ -173,7 +204,11 @@ func _send_stream(messages: Array, key: String) -> void:
 	var err := _stream_client.connect_to_host(parts["host"], parts["port"], parts["tls"])
 	if err != OK:
 		_stream_client = null
-		request_failed.emit("Could not start stream (error %d)." % err)
+		var connect_message := "Could not start stream (error %d)." % err
+		if _retry_attempt < max_retries:
+			_schedule_retry(_backoff_delay(), connect_message)
+		else:
+			request_failed.emit(connect_message)
 		return
 
 	_stream_request_sent = false
@@ -217,11 +252,11 @@ static func _parse_url(url: String) -> Dictionary:
 
 func _poll_stream() -> void:
 	if Time.get_ticks_msec() > _stream_deadline:
-		_finish_stream_error("The request timed out. Lower reasoning effort or try again.")
+		_finish_stream_error("The request timed out. Lower reasoning effort or try again.", true)
 		return
 	var err := _stream_client.poll()
 	if err != OK:
-		_finish_stream_error("Network error (poll %d)." % err)
+		_finish_stream_error("Network error (poll %d)." % err, true)
 		return
 	match _stream_client.get_status():
 		HTTPClient.STATUS_RESOLVING, HTTPClient.STATUS_CONNECTING:
@@ -231,7 +266,7 @@ func _poll_stream() -> void:
 				return
 			var request_err := _stream_client.request(HTTPClient.METHOD_POST, _stream_path, _stream_headers, _stream_body)
 			if request_err != OK:
-				_finish_stream_error("Could not start stream (error %d)." % request_err)
+				_finish_stream_error("Could not start stream (error %d)." % request_err, true)
 				return
 			_stream_request_sent = true
 		HTTPClient.STATUS_REQUESTING:
@@ -244,11 +279,11 @@ func _poll_stream() -> void:
 		_:
 			# Connection closed or failed mid-stream.
 			if not _stream_request_sent:
-				_finish_stream_error("Could not connect to the API endpoint.")
+				_finish_stream_error("Could not connect to the API endpoint.", true)
 			elif _stream_code != 200:
 				_finish_stream_error_from_body()
 			elif _stream_content.is_empty():
-				_finish_stream_error("The stream ended without data.")
+				_finish_stream_error("The stream ended without data.", true)
 			else:
 				_finish_stream_success()
 
@@ -336,9 +371,12 @@ func _finish_stream_success() -> void:
 		response_received.emit(content)
 
 
-func _finish_stream_error(message: String) -> void:
+func _finish_stream_error(message: String, retryable := false) -> void:
 	_cleanup_stream()
-	request_failed.emit(message)
+	if retryable and _retry_attempt < max_retries:
+		_schedule_retry(_backoff_delay(), message)
+	else:
+		request_failed.emit(message)
 
 
 func _finish_stream_error_from_body() -> void:
@@ -350,7 +388,13 @@ func _finish_stream_error_from_body() -> void:
 	if _stream_client != null:
 		headers = _stream_client.get_response_headers()
 	_cleanup_stream()
-	request_failed.emit(_describe_error(code, parsed, headers))
+	if _is_retryable_code(code) and _retry_attempt < max_retries:
+		var wait := 0.0
+		if code == 429:
+			wait = _parse_retry_after(headers)
+		_schedule_retry(_backoff_delay(maxf(wait, 0.0)), _describe_error(code, parsed, headers))
+	else:
+		request_failed.emit(_describe_error(code, parsed, headers))
 
 
 func _cleanup_stream() -> void:
@@ -362,19 +406,82 @@ func _cleanup_stream() -> void:
 	busy = false
 
 
+func _schedule_retry(delay: float, terminal_message: String) -> void:
+	if get_tree() == null:
+		busy = false
+		request_failed.emit(terminal_message)
+		return
+	_retry_attempt += 1
+	busy = true
+	var generation := _request_generation
+	print("[GdAI] Transient failure; retrying in %.1fs (attempt %d of %d)." % [delay, _retry_attempt + 1, max_retries + 1])
+	retry_scheduled.emit(_retry_attempt + 1, max_retries + 1, delay)
+	get_tree().create_timer(delay).timeout.connect(func():
+		if generation != _request_generation:
+			return # cancelled or superseded while waiting
+		_start_request()
+	)
+
+
+func _backoff_delay(extra_min := 0.0) -> float:
+	var delay := minf(retry_base_delay * pow(2.0, float(_retry_attempt)), retry_max_delay)
+	return maxf(delay, extra_min) + randf() * 0.5
+
+
+static func _is_retryable_code(code: int) -> bool:
+	return code == 429 or code == 500 or code == 502 or code == 503 or code == 504
+
+
+static func _is_retryable_result(result: int) -> bool:
+	return result in [
+		HTTPRequest.RESULT_TIMEOUT,
+		HTTPRequest.RESULT_CANT_CONNECT,
+		HTTPRequest.RESULT_CANT_RESOLVE,
+		HTTPRequest.RESULT_CONNECTION_ERROR,
+		HTTPRequest.RESULT_NO_RESPONSE,
+		HTTPRequest.RESULT_REQUEST_FAILED,
+	]
+
+
+static func _parse_retry_after(headers: PackedStringArray) -> float:
+	for h in headers:
+		if h.to_lower().begins_with("retry-after:"):
+			var pos := h.find(":")
+			if pos == -1:
+				return -1.0
+			var value := h.substr(pos + 1).strip_edges()
+			if value.is_valid_float() or value.is_valid_int():
+				return maxf(float(value), 0.0)
+			return -1.0
+	return -1.0
+
+
 # Handles what happens when a request is complete
 func _on_request_completed(result: int, code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
+	if not _expecting_response:
+		return # stale completion after cancel; a retry timer or newer request owns the state
+	_expecting_response = false
 	busy = false
 
 	if result != HTTPRequest.RESULT_SUCCESS:
-		request_failed.emit("Network error (result %d)." % result)
+		var net_message := "Network error (result %d)." % result
+		if _is_retryable_result(result) and _retry_attempt < max_retries:
+			_schedule_retry(_backoff_delay(), net_message)
+		else:
+			request_failed.emit(net_message)
 		return
 
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
 
 	# If there is an error code, check what the error code was
 	if code != 200:
-		request_failed.emit(_describe_error(code, parsed, headers))
+		if _is_retryable_code(code) and _retry_attempt < max_retries:
+			var wait := 0.0
+			if code == 429:
+				wait = _parse_retry_after(headers)
+			_schedule_retry(_backoff_delay(maxf(wait, 0.0)), _describe_error(code, parsed, headers))
+		else:
+			request_failed.emit(_describe_error(code, parsed, headers))
 		return
 
 	# Handle an unexpected response
@@ -454,6 +561,6 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 		500, 502, 503:
 			return "Server error. Try again shortly. (%s)" % shown
 		504:
-			return "The request timed out. Lower reasoning effort or use streaming."
+			return "The request timed out. Lower reasoning effort or try again."
 		_:
 			return shown
