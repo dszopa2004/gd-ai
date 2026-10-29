@@ -9,7 +9,7 @@ signal request_failed(message: String)
 const URL := "https://api.meta.ai/v1/chat/completions" # API Url
 
 var api_key := ""
-var model := "muse-spark-1.3"
+var model := "muse-spark-1.3-contributor"
 var reasoning_effort := "minimal"   # "minimal" | "low" | "medium" | "high" | "xhigh" ("none" is rejected)
 var system_prompt := ""         # sent as a developer message, never stored in chat history
 var max_completion_tokens := 64 #2048
