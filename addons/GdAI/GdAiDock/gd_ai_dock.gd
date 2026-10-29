@@ -57,6 +57,8 @@ func _ready() -> void:
 	client.system_prompt = "You are a helpful assistant inside the Godot editor."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
+	client.streaming = true
+	client.stream_updated.connect(_on_ai_stream)
 	var custom_url := OS.get_environment("MODEL_API_URL").strip_edges()
 	if not custom_url.is_empty():
 		client.api_url = custom_url
@@ -186,6 +188,12 @@ func _on_cancel_requested() -> void:
 	_refresh_send_button()
 	if user_input_box != null:
 		user_input_box.grab_focus()
+
+
+# Append streamed chunks into the pending bubble as they arrive.
+func _on_ai_stream(full_text: String) -> void:
+	if pending_ai_message != null and is_instance_valid(pending_ai_message):
+		pending_ai_message.set_message_text(full_text)
 
 
 # Set ai response message
