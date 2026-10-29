@@ -5,6 +5,7 @@ class_name AiClient
 
 signal response_received(text: String)
 signal request_failed(message: String)
+signal stream_updated(full_text: String)
 
 const URL := "https://api.meta.ai/v1/chat/completions" # API Url
 
@@ -15,13 +16,28 @@ var system_prompt := ""         # sent as a developer message, never stored in c
 var max_completion_tokens := 64 #2048
 var busy := false
 var api_url := URL # override (e.g. via MODEL_API_URL) to test another endpoint without editing code
+var streaming := false # when true, send() uses stream:true with chunked SSE append
+var stream_timeout := 120.0 # seconds for the whole streamed request
 
 var _http: HTTPRequest
+var _stream_client: HTTPClient
+var _streaming_active := false
+var _stream_request_sent := false
+var _stream_status_checked := false
+var _stream_code := 0
+var _stream_path := ""
+var _stream_headers := PackedStringArray()
+var _stream_body := ""
+var _stream_leftover := ""
+var _stream_content := ""
+var _stream_error_bytes := PackedByteArray()
+var _stream_deadline := 0
 
 
 # Generate a new HTTP request upon instantiation
 func _ready() -> void:
 	_ensure_http()
+	set_process(false) # enabled only while a stream is being polled
 
 
 func _ensure_http() -> void:
@@ -47,6 +63,9 @@ func send(messages: Array) -> void:
 		return
 	if key.contains(" ") or key.contains("\t") or key.contains("\n") or key.contains("\r"):
 		request_failed.emit("API key contains spaces or line breaks. Re-copy it without quotes or extra characters.")
+		return
+	if streaming:
+		_send_stream(messages, key)
 		return
 	_ensure_http()
 	if _http == null:
@@ -112,6 +131,234 @@ static func fingerprint(raw: String) -> String:
 func cancel() -> void:
 	if _http != null:
 		_http.cancel_request()
+	if _streaming_active:
+		_cleanup_stream()
+	busy = false
+
+
+func _process(_delta: float) -> void:
+	if _streaming_active:
+		_poll_stream()
+
+
+# Starts a stream:true request polled through HTTPClient (HTTPRequest can't stream).
+func _send_stream(messages: Array, key: String) -> void:
+	var url := api_url.strip_edges()
+	if url.is_empty():
+		url = URL
+	var parts := _parse_url(url)
+	if parts.is_empty():
+		request_failed.emit("Invalid API endpoint URL.")
+		return
+
+	var payload_messages: Array = []
+	if not system_prompt.is_empty():
+		payload_messages.append({"role": "developer", "content": system_prompt})
+	payload_messages.append_array(messages)
+
+	_stream_client = HTTPClient.new()
+	_stream_path = parts["path"]
+	_stream_headers = PackedStringArray([
+		"Authorization: Bearer %s" % key,
+		"Content-Type: application/json",
+		"Accept: text/event-stream",
+	])
+	_stream_body = JSON.stringify({
+		"model": model,
+		"messages": payload_messages,
+		"reasoning_effort": reasoning_effort,
+		"max_completion_tokens": max_completion_tokens,
+		"stream": true,
+	})
+	var err := _stream_client.connect_to_host(parts["host"], parts["port"], parts["tls"])
+	if err != OK:
+		_stream_client = null
+		request_failed.emit("Could not start stream (error %d)." % err)
+		return
+
+	_stream_request_sent = false
+	_stream_status_checked = false
+	_stream_code = 0
+	_stream_leftover = ""
+	_stream_content = ""
+	_stream_error_bytes = PackedByteArray()
+	_stream_deadline = Time.get_ticks_msec() + int(stream_timeout * 1000.0)
+	_streaming_active = true
+	set_process(true)
+	busy = true
+
+
+static func _parse_url(url: String) -> Dictionary:
+	var rest := url.strip_edges()
+	var tls := false
+	if rest.begins_with("https://"):
+		tls = true
+		rest = rest.substr("https://".length())
+	elif rest.begins_with("http://"):
+		rest = rest.substr("http://".length())
+	else:
+		return {}
+	var slash := rest.find("/")
+	var authority := rest if slash == -1 else rest.left(slash)
+	var path := "/" if slash == -1 else rest.substr(slash)
+	var host := authority
+	var port := 443 if tls else 80
+	var colon := authority.rfind(":")
+	if colon != -1:
+		host = authority.left(colon)
+		var port_str := authority.substr(colon + 1)
+		if not port_str.is_valid_int():
+			return {}
+		port = int(port_str)
+	if host.is_empty():
+		return {}
+	return {"host": host, "port": port, "tls": tls, "path": path}
+
+
+func _poll_stream() -> void:
+	if Time.get_ticks_msec() > _stream_deadline:
+		_finish_stream_error("The request timed out. Lower reasoning effort or try again.")
+		return
+	var err := _stream_client.poll()
+	if err != OK:
+		_finish_stream_error("Network error (poll %d)." % err)
+		return
+	match _stream_client.get_status():
+		HTTPClient.STATUS_RESOLVING, HTTPClient.STATUS_CONNECTING:
+			return
+		HTTPClient.STATUS_CONNECTED:
+			if _stream_request_sent:
+				return
+			var request_err := _stream_client.request(HTTPClient.METHOD_POST, _stream_path, _stream_headers, _stream_body)
+			if request_err != OK:
+				_finish_stream_error("Could not start stream (error %d)." % request_err)
+				return
+			_stream_request_sent = true
+		HTTPClient.STATUS_REQUESTING:
+			return
+		HTTPClient.STATUS_BODY:
+			if not _stream_status_checked:
+				_stream_status_checked = true
+				_stream_code = _stream_client.get_response_code()
+			_read_stream_chunks()
+		_:
+			# Connection closed or failed mid-stream.
+			if not _stream_request_sent:
+				_finish_stream_error("Could not connect to the API endpoint.")
+			elif _stream_code != 200:
+				_finish_stream_error_from_body()
+			elif _stream_content.is_empty():
+				_finish_stream_error("The stream ended without data.")
+			else:
+				_finish_stream_success()
+
+
+func _read_stream_chunks() -> void:
+	while _stream_client.get_status() == HTTPClient.STATUS_BODY:
+		var chunk := _stream_client.read_response_body_chunk()
+		if chunk.is_empty():
+			break
+		if _stream_code != 200:
+			_stream_error_bytes.append_array(chunk)
+		else:
+			_append_stream_text(chunk.get_string_from_utf8())
+			if not _streaming_active:
+				return # [DONE] or an error finished the stream mid-read.
+	if _stream_code != 200 and _stream_body_complete():
+		_finish_stream_error_from_body()
+
+
+func _stream_body_complete() -> bool:
+	var total := _stream_client.get_response_body_length()
+	return total >= 0 and _stream_client.get_downloaded_bytes() >= total
+
+
+func _append_stream_text(text: String) -> void:
+	_stream_leftover += text
+	var lines := _stream_leftover.split("\n")
+	_stream_leftover = lines[lines.size() - 1]
+	for i in range(lines.size() - 1):
+		if not _streaming_active:
+			return
+		_handle_sse_line(lines[i].strip_edges())
+
+
+func _handle_sse_line(line: String) -> void:
+	if line.is_empty() or line.begins_with(":"):
+		return
+	if not line.begins_with("data:"):
+		return
+	var payload := line.substr("data:".length()).strip_edges()
+	if payload.is_empty():
+		return
+	if payload == "[DONE]":
+		_finish_stream_success()
+		return
+	var parsed = JSON.parse_string(payload)
+	if not parsed is Dictionary:
+		return
+	if parsed.get("error") != null:
+		_finish_stream_error(_stream_error_message(parsed["error"]))
+		return
+	var choices = parsed.get("choices", [])
+	if not choices is Array or choices.is_empty():
+		return
+	var first = choices[0]
+	if not first is Dictionary:
+		return
+	var delta = first.get("delta", {})
+	if not delta is Dictionary:
+		return
+	var piece = delta.get("content", "")
+	if piece is String and not piece.is_empty():
+		_stream_content += piece
+		stream_updated.emit(_stream_content)
+
+
+static func _stream_error_message(err) -> String:
+	var message := "Stream error."
+	if err is Dictionary:
+		message = str(err.get("message", message))
+		var code := str(err.get("code", ""))
+		if not code.is_empty():
+			message = "%s: %s" % [code, message]
+	elif err is String and not err.strip_edges().is_empty():
+		message = err.strip_edges()
+	return message
+
+
+func _finish_stream_success() -> void:
+	var content := _stream_content
+	_cleanup_stream()
+	if content.is_empty():
+		request_failed.emit("Response had empty content.")
+	else:
+		response_received.emit(content)
+
+
+func _finish_stream_error(message: String) -> void:
+	_cleanup_stream()
+	request_failed.emit(message)
+
+
+func _finish_stream_error_from_body() -> void:
+	var parsed = null
+	if not _stream_error_bytes.is_empty():
+		parsed = JSON.parse_string(_stream_error_bytes.get_string_from_utf8())
+	var headers := PackedStringArray()
+	var code := _stream_code
+	if _stream_client != null:
+		headers = _stream_client.get_response_headers()
+	_cleanup_stream()
+	request_failed.emit(_describe_error(code, parsed, headers))
+
+
+func _cleanup_stream() -> void:
+	_streaming_active = false
+	set_process(false)
+	if _stream_client != null:
+		_stream_client.close()
+		_stream_client = null
 	busy = false
 
 
