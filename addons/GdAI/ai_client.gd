@@ -48,6 +48,7 @@ func _ready() -> void:
 	set_process(false) # enabled only while a stream is being polled
 
 
+# Ensure there is a http request
 func _ensure_http() -> void:
 	if _http != null:
 		return
@@ -78,31 +79,41 @@ func send(messages: Array) -> void:
 	_start_request()
 
 
+# Start a request to AI
 func _start_request() -> void:
-	var key := _sanitize_key(api_key)
+	var key := _sanitize_key(api_key) # Sanitize key
+
+	# Handle no API key set
 	if key.is_empty():
 		busy = false
 		_expecting_response = false
 		request_failed.emit("No API key set. Set the MODEL_API_KEY environment variable and fully relaunch the editor (Cmd+Q, not just reopen the project).")
 		return
+
+	# Handle if already streaming
 	if streaming:
 		_send_stream(_pending_messages, key)
 		return
-	_ensure_http()
+
+	_ensure_http() # Create HTTP response
 	if _http == null:
 		busy = false
 		request_failed.emit("HTTP client is not ready.")
 		return
 
+	# Set payload messages
 	var payload_messages: Array = []
 	if not system_prompt.is_empty():
 		payload_messages.append({"role": "developer", "content": system_prompt})
 	payload_messages.append_array(_pending_messages)
 
+	# Set HTTP headers
 	var headers := PackedStringArray([
 		"Authorization: Bearer %s" % key,
 		"Content-Type: application/json",
 	])
+
+	# Create JSON body and fill settings
 	var body := JSON.stringify({
 		"model": model,
 		"messages": payload_messages,
@@ -110,12 +121,16 @@ func _start_request() -> void:
 		"max_completion_tokens": max_completion_tokens,
 	})
 
-	var url := api_url.strip_edges()
+	var url := api_url.strip_edges() # Strip URL
 	if url.is_empty():
 		url = URL
+
+	# Send POST request
 	var err := _http.request(url, headers, HTTPClient.METHOD_POST, body)
 	if err != OK:
 		var start_message := "Could not start request (error %d)." % err
+
+		# Check if can retry
 		if _retry_attempt < max_retries:
 			_schedule_retry(_backoff_delay(), start_message)
 		else:
@@ -137,6 +152,7 @@ static func _sanitize_key(raw: String) -> String:
 	return key
 
 
+# Check if API key looks like placeholder
 static func _looks_like_placeholder(key: String) -> bool:
 	var lowered := key.to_lower()
 	if lowered in ["your-key-here", "your_api_key", "your-api-key", "changeme", "xxx", "test", "key", "api_key", "apikey"]:
@@ -167,6 +183,7 @@ func cancel() -> void:
 	busy = false
 
 
+# Stream
 func _process(_delta: float) -> void:
 	if _streaming_active:
 		_poll_stream()
@@ -223,6 +240,7 @@ func _send_stream(messages: Array, key: String) -> void:
 	busy = true
 
 
+# Parse URL
 static func _parse_url(url: String) -> Dictionary:
 	var rest := url.strip_edges()
 	var tls := false
@@ -250,6 +268,7 @@ static func _parse_url(url: String) -> Dictionary:
 	return {"host": host, "port": port, "tls": tls, "path": path}
 
 
+# Poll stream
 func _poll_stream() -> void:
 	if Time.get_ticks_msec() > _stream_deadline:
 		_finish_stream_error("The request timed out. Lower reasoning effort or try again.", true)
@@ -288,6 +307,7 @@ func _poll_stream() -> void:
 				_finish_stream_success()
 
 
+# Read the stream chunks
 func _read_stream_chunks() -> void:
 	while _stream_client.get_status() == HTTPClient.STATUS_BODY:
 		var chunk := _stream_client.read_response_body_chunk()
@@ -303,11 +323,13 @@ func _read_stream_chunks() -> void:
 		_finish_stream_error_from_body()
 
 
+# Confirm if stream body is complete
 func _stream_body_complete() -> bool:
 	var total := _stream_client.get_response_body_length()
 	return total >= 0 and _stream_client.get_downloaded_bytes() >= total
 
 
+# Append stream text
 func _append_stream_text(text: String) -> void:
 	_stream_leftover += text
 	var lines := _stream_leftover.split("\n")
@@ -318,6 +340,7 @@ func _append_stream_text(text: String) -> void:
 		_handle_sse_line(lines[i].strip_edges())
 
 
+# Handle SSE
 func _handle_sse_line(line: String) -> void:
 	if line.is_empty() or line.begins_with(":"):
 		return
@@ -350,6 +373,7 @@ func _handle_sse_line(line: String) -> void:
 		stream_updated.emit(_stream_content)
 
 
+# Get stream error message
 static func _stream_error_message(err) -> String:
 	var message := "Stream error."
 	if err is Dictionary:
@@ -362,6 +386,7 @@ static func _stream_error_message(err) -> String:
 	return message
 
 
+# Finish stream
 func _finish_stream_success() -> void:
 	var content := _stream_content
 	_cleanup_stream()
@@ -371,6 +396,7 @@ func _finish_stream_success() -> void:
 		response_received.emit(content)
 
 
+# Emit stream error message
 func _finish_stream_error(message: String, retryable := false) -> void:
 	_cleanup_stream()
 	if retryable and _retry_attempt < max_retries:
@@ -379,6 +405,7 @@ func _finish_stream_error(message: String, retryable := false) -> void:
 		request_failed.emit(message)
 
 
+# Emit stream error from body
 func _finish_stream_error_from_body() -> void:
 	var parsed = null
 	if not _stream_error_bytes.is_empty():
@@ -397,6 +424,7 @@ func _finish_stream_error_from_body() -> void:
 		request_failed.emit(_describe_error(code, parsed, headers))
 
 
+# Cleanup stream
 func _cleanup_stream() -> void:
 	_streaming_active = false
 	set_process(false)
@@ -406,6 +434,7 @@ func _cleanup_stream() -> void:
 	busy = false
 
 
+# Schedule a retry
 func _schedule_retry(delay: float, terminal_message: String) -> void:
 	if get_tree() == null:
 		busy = false
@@ -423,15 +452,18 @@ func _schedule_retry(delay: float, terminal_message: String) -> void:
 	)
 
 
+# Set backoff delay
 func _backoff_delay(extra_min := 0.0) -> float:
 	var delay := minf(retry_base_delay * pow(2.0, float(_retry_attempt)), retry_max_delay)
 	return maxf(delay, extra_min) + randf() * 0.5
 
 
+# Return if a code is a retryable code
 static func _is_retryable_code(code: int) -> bool:
 	return code == 429 or code == 500 or code == 502 or code == 503 or code == 504
 
 
+# Return if a HTTP request is retryable
 static func _is_retryable_result(result: int) -> bool:
 	return result in [
 		HTTPRequest.RESULT_TIMEOUT,
@@ -443,6 +475,7 @@ static func _is_retryable_result(result: int) -> bool:
 	]
 
 
+# Parse error
 static func _parse_retry_after(headers: PackedStringArray) -> float:
 	for h in headers:
 		if h.to_lower().begins_with("retry-after:"):
