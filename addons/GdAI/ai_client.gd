@@ -25,6 +25,8 @@ var retry_base_delay := 1.0 # seconds; doubles per attempt, plus jitter
 var retry_max_delay := 30.0 # seconds; ceiling for backoff (a Retry-After header can extend past it)
 var tools: Array = [] # declared editor actions, sent as the tools array (empty = plain chat)
 var tool_choice = "auto" # "auto" | "none" | "required", or {"type": "function", "function": {"name": ...}}
+var context_prompt := "" # fresh editor snapshot per request; never stored in chat history
+var max_context_chars := 4000 # clamp on injected context (<= 0 = unlimited)
 
 var _http: HTTPRequest
 var _stream_client: HTTPClient
@@ -113,6 +115,9 @@ func _start_request() -> void:
 	var effective_system := _effective_system_prompt()
 	if not effective_system.is_empty():
 		payload_messages.append({"role": "developer", "content": effective_system})
+	var context := _effective_context_prompt()
+	if not context.is_empty():
+		payload_messages.append({"role": "developer", "content": context})
 	payload_messages.append_array(_pending_messages)
 
 	# Set HTTP headers
@@ -302,6 +307,15 @@ func _effective_system_prompt() -> String:
 	return system_prompt + "\n\n" + _json_fallback_instruction()
 
 
+func _effective_context_prompt() -> String:
+	var context := context_prompt.strip_edges()
+	if context.is_empty():
+		return ""
+	if max_context_chars > 0 and context.length() > max_context_chars:
+		context = context.left(max_context_chars).strip_edges() + "\n…(context truncated)"
+	return context
+
+
 func _apply_tool_fields(payload: Dictionary) -> void:
 	if _json_fallback_active:
 		payload["response_format"] = {"type": "json_object"}
@@ -344,6 +358,9 @@ func _send_stream(messages: Array, key: String) -> void:
 	var effective_system := _effective_system_prompt()
 	if not effective_system.is_empty():
 		payload_messages.append({"role": "developer", "content": effective_system})
+	var context := _effective_context_prompt()
+	if not context.is_empty():
+		payload_messages.append({"role": "developer", "content": context})
 	payload_messages.append_array(messages)
 
 	_stream_client = HTTPClient.new()
