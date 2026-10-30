@@ -44,6 +44,26 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
 
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_levkg"]
+bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dbfrc"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_02nqv"]
+bg_color = Color(0.24115604, 0.24115604, 0.24115601, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_7770v"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dq450"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
@@ -107,6 +127,16 @@ theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_wn14f")
 toggle_mode = true
 button_group = ExtResource("3_svh0w")
 text = "History"
+
+[node name="SettingsButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=100920474]
+layout_mode = 2
+theme_override_styles/normal = SubResource("StyleBoxFlat_levkg")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_dbfrc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_02nqv")
+theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_7770v")
+toggle_mode = true
+button_group = ExtResource("3_svh0w")
+text = "Settings"
 
 [node name="OutputPanelBackground" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer" unique_id=865799881]
 layout_mode = 2
