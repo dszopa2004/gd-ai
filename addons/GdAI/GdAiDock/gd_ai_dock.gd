@@ -89,7 +89,6 @@ func _on_chat_button_pressed() -> void:
 	chat_button.button_pressed = true
 	chat_menu.visible = true
 	history_menu.visible = false
-	settings_menu.visible = false
 	if settings_menu != null:
 		settings_menu.visible = false
 
@@ -99,11 +98,19 @@ func _on_user_input_box_text_changed() -> void:
 	_refresh_send_button()
 
 
+# Cancel stays available while a reply is outstanding, even if the client
+# is no longer busy (stuck bubble), so the UI is always recoverable.
+func _can_cancel() -> bool:
+	if client == null:
+		return false
+	return client.busy or pending_ai_message != null
+
+
 # The send button doubles as a cancel button while a request is in flight.
 func _refresh_send_button() -> void:
 	if send_button == null or user_input_box == null:
 		return
-	if client != null and client.busy:
+	if _can_cancel():
 		send_button.visible = true
 		send_button.disabled = false
 		send_button.text = "Cancel"
@@ -122,7 +129,7 @@ func _on_input_gui_input(event: InputEvent) -> void:
 			and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
 			# Esc cancels an in-flight request; otherwise let it propagate.
-			if client != null and client.busy:
+			if _can_cancel():
 				user_input_box.accept_event()
 				_on_cancel_requested()
 			return
@@ -142,7 +149,7 @@ func _on_input_gui_input(event: InputEvent) -> void:
 func _unhandled_key_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo \
 			and event.keycode == KEY_ESCAPE \
-			and client != null and client.busy:
+			and _can_cancel():
 		var focus_owner := get_viewport().gui_get_focus_owner()
 		if focus_owner == null or (focus_owner != self and not is_ancestor_of(focus_owner)):
 			return
@@ -152,7 +159,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 # Signal to handle send button press
 func _on_send_button_pressed() -> void:
-	if client != null and client.busy:
+	if _can_cancel():
 		# The button is in cancel mode while a request is in flight.
 		_on_cancel_requested()
 		return
@@ -181,6 +188,7 @@ func _on_send_button_pressed() -> void:
 	# Fresh editor snapshot for this request (never stored in history).
 	client.context_prompt = _build_editor_context()
 	pending_ai_message = add_message("Thinking...", false)
+	print("[GdAI] Sending: stream=%s tools=%d history=%d." % [client.streaming, client.tools.size(), history.size()])
 	# Refresh send visibility/disabled now that a request is about to start.
 	# client.send sets busy=true on success; update again after in case it failed fast.
 	client.send(history)
@@ -188,10 +196,16 @@ func _on_send_button_pressed() -> void:
 
 
 # Cancel the in-flight request at the user's request (cancel button or Esc).
+# Also recovers a stuck bubble when no request is actually active.
 func _on_cancel_requested() -> void:
-	if client == null or not client.busy:
+	if client == null:
 		return
-	client.cancel()
+	if client.busy:
+		client.cancel()
+	elif pending_ai_message == null:
+		return
+	else:
+		print("[GdAI] Cleared stuck reply UI (no request was active).")
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Request cancelled.")
 	pending_ai_message = null
