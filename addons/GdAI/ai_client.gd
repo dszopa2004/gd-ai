@@ -10,6 +10,9 @@ signal retry_scheduled(next_attempt: int, total_attempts: int, delay_sec: float)
 signal tool_calls_received(calls: Array, preamble: String)
 
 const URL := "https://api.meta.ai/v1/chat/completions" # API Url
+const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
+const SETTINGS_API_URL := "plugins/gd_ai/api_url"
+const SETTINGS_MODEL := "plugins/gd_ai/model"
 
 var api_key := ""
 var model := "muse-spark-1.3-contributor"
@@ -69,11 +72,7 @@ func _ensure_http() -> void:
 	_http.request_completed.connect(_on_request_completed)
 
 
-const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
-const SETTINGS_API_URL := "plugins/gd_ai/api_url"
-const SETTINGS_MODEL := "plugins/gd_ai/model"
-
-
+# Checks if the editor has the API key and returns it
 static func _get_editor_setting(settings: EditorSettings, key: String) -> String:
 	if settings.has_setting(key):
 		return str(settings.get_setting(key))
@@ -349,6 +348,7 @@ func _json_fallback_instruction() -> String:
 	return "\n".join(lines)
 
 
+# Choose effective tool
 func _effective_tool_choice() -> Variant:
 	if tool_choice is Dictionary:
 		return tool_choice
@@ -357,6 +357,7 @@ func _effective_tool_choice() -> Variant:
 	return "auto"
 
 
+# Choose system prompt
 func _effective_system_prompt() -> String:
 	if not _json_fallback_active:
 		return system_prompt
@@ -365,6 +366,7 @@ func _effective_system_prompt() -> String:
 	return system_prompt + "\n\n" + _json_fallback_instruction()
 
 
+# Implement context prompt
 func _effective_context_prompt() -> String:
 	var context := context_prompt.strip_edges()
 	if context.is_empty():
@@ -374,6 +376,7 @@ func _effective_context_prompt() -> String:
 	return context
 
 
+# Apply tool field
 func _apply_tool_fields(payload: Dictionary) -> void:
 	if _json_fallback_active:
 		payload["response_format"] = {"type": "json_object"}
@@ -860,6 +863,7 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 	return {"messages": kept, "dropped": messages.size() - kept.size()}
 
 
+# Check if a tool might be unsupported
 static func _looks_like_tools_unsupported(parsed) -> bool:
 	if not parsed is Dictionary:
 		return false
@@ -893,6 +897,7 @@ func _maybe_start_json_fallback(code: int, parsed) -> bool:
 	return true
 
 
+# Handle a native tool call
 func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 	var calls: Array = []
 	var stamp := Time.get_ticks_msec()
@@ -938,6 +943,7 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 	tool_calls_received.emit(calls, preamble)
 
 
+# Handle fallback
 func _handle_fallback_json(text: String) -> void:
 	if text.is_empty():
 		request_failed.emit("Response had empty content.")
@@ -985,6 +991,7 @@ func _handle_fallback_json(text: String) -> void:
 	tool_calls_received.emit(calls, preamble)
 
 
+# Accumulate tool
 func _accumulate_tool_delta(raw) -> void:
 	if not raw is Dictionary:
 		return
