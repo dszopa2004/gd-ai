@@ -24,6 +24,9 @@ const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/Messag
 const BUBBLE_RATIO := 1.0
 const SPACER_RATIO := 0.25
 const MAX_LINES := 8
+const TREE_NODE_BUDGET := 60
+const TREE_DEPTH_BUDGET := 8
+const SELECTION_BUDGET := 8
 
 var current_chat: Dictionary = {}
 var client: AiClient
@@ -173,6 +176,8 @@ func _on_send_button_pressed() -> void:
 	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 
+	# Fresh editor snapshot for this request (never stored in history).
+	client.context_prompt = _build_editor_context()
 	pending_ai_message = add_message("Thinking...", false)
 	# Refresh send visibility/disabled now that a request is about to start.
 	# client.send sets busy=true on success; update again after in case it failed fast.
@@ -304,6 +309,59 @@ func _record_message(role: String, content: String) -> void:
 
 
 # Make title for chat in history
+# Snapshot of editor state for the next request. Never stored in chat history.
+func _build_editor_context() -> String:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return "[Editor context]\nNo scene is currently open in the editor."
+	var lines: Array[String] = []
+	lines.append("[Editor context]")
+	var scene_path := root.scene_file_path
+	if scene_path.is_empty():
+		scene_path = "(unsaved scene)"
+	lines.append("Scene: %s (root: %s, %s)" % [scene_path, root.name, root.get_class()])
+	var open_scenes = EditorInterface.get_open_scenes()
+	if open_scenes.size() > 1:
+		lines.append("Open scenes: %d" % open_scenes.size())
+	var selected := EditorInterface.get_selection().get_selected_nodes()
+	if not selected.is_empty():
+		var shown: Array[String] = []
+		for i in mini(selected.size(), SELECTION_BUDGET):
+			var node: Node = selected[i]
+			shown.append("%s (%s)" % [_scene_rel_path(root, node), node.get_class()])
+		var extra := selected.size() - shown.size()
+		if extra > 0:
+			shown.append("+%d more" % extra)
+		lines.append("Selected: %s" % ", ".join(shown))
+	lines.append("Tree:")
+	var shown_count := 0
+	var truncated := false
+	var stack: Array = [[root, 0]]
+	while not stack.is_empty():
+		var entry: Array = stack.pop_back()
+		var node: Node = entry[0]
+		var depth: int = entry[1]
+		if depth > TREE_DEPTH_BUDGET or shown_count >= TREE_NODE_BUDGET:
+			truncated = true
+			continue
+		lines.append("%s%s (%s)" % ["  ".repeat(depth), node.name, node.get_class()])
+		shown_count += 1
+		var children := node.get_children()
+		for i in range(children.size() - 1, -1, -1):
+			stack.append([children[i], depth + 1])
+	if truncated:
+		lines.append("… (tree truncated to %d nodes, depth %d)" % [TREE_NODE_BUDGET, TREE_DEPTH_BUDGET])
+	return "\n".join(lines)
+
+
+func _scene_rel_path(root: Node, node: Node) -> String:
+	if node == root:
+		return "."
+	if root.is_ancestor_of(node):
+		return str(root.get_path_to(node))
+	return str(node.get_path())
+
+
 func _make_title(text: String) -> String:
 	var line := text.split("\n")[0].strip_edges()
 	return line if line.length() <= 40 else line.substr(0, 40) + "…"
