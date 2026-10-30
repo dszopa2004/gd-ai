@@ -19,6 +19,13 @@ extends Control
 @export var history_list: VBoxContainer
 @export var new_chat_button: Button
 
+@export_category("Settings")
+@export var settings_button: Button
+@export var settings_dialog: AcceptDialog
+@export var api_key_field: LineEdit
+@export var endpoint_field: LineEdit
+@export var model_picker: OptionButton
+
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
 const BUBBLE_RATIO := 1.0
@@ -54,9 +61,6 @@ func _ready() -> void:
 	# Set up ai client
 	client = AiClient.new()
 	add_child(client)
-	# Prefer an environment variable over hardcoding the key.
-	var raw_key := OS.get_environment("MODEL_API_KEY")
-	client.api_key = raw_key.strip_edges()
 	client.system_prompt = "You are a helpful assistant inside the Godot editor."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
@@ -67,14 +71,8 @@ func _ready() -> void:
 	# rendered as text until Phase 2 executes them.
 	client.tools = AiClient.default_tools() # Set to [] to use less tokens by not using tools
 	client.tool_calls_received.connect(_on_ai_tool_calls)
-	var custom_url := OS.get_environment("MODEL_API_URL").strip_edges()
-	if not custom_url.is_empty():
-		client.api_url = custom_url
-	print("[GdAI] API endpoint: %s" % client.api_url)
-	if client.api_key.is_empty():
-		push_warning("[GdAI] MODEL_API_KEY is empty. Set it and fully relaunch the editor (Cmd+Q).")
-	else:
-		print("[GdAI] MODEL_API_KEY loaded (%s)." % AiClient.fingerprint(raw_key))
+	client.load_config()
+	_setup_settings_ui()
 
 	# Remember the send button's scene appearance so cancel mode can restore it.
 	_send_button_text = send_button.text
@@ -360,6 +358,66 @@ func _scene_rel_path(root: Node, node: Node) -> String:
 	if root.is_ancestor_of(node):
 		return str(root.get_path_to(node))
 	return str(node.get_path())
+
+
+const MODEL_OPTIONS := ["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.2", "muse-spark-1.1"]
+
+
+func _setup_settings_ui() -> void:
+	if settings_button != null:
+		settings_button.pressed.connect(_on_settings_opened)
+	else:
+		push_warning("[GdAI] Settings button export is unassigned.")
+	if model_picker != null and model_picker.item_count == 0:
+		for option in MODEL_OPTIONS:
+			model_picker.add_item(option)
+	if settings_dialog != null:
+		settings_dialog.confirmed.connect(_on_settings_saved)
+	else:
+		push_warning("[GdAI] Settings dialog export is unassigned.")
+	if api_key_field == null or endpoint_field == null or model_picker == null:
+		push_warning("[GdAI] One or more settings field exports are unassigned.")
+
+
+func _on_settings_opened() -> void:
+	if settings_dialog == null or client == null:
+		return
+	if api_key_field != null:
+		api_key_field.text = client.api_key
+	if endpoint_field != null:
+		endpoint_field.text = client.api_url
+	_select_model(client.model)
+	settings_dialog.popup_centered()
+
+
+func _select_model(model_name: String) -> void:
+	if model_picker == null:
+		return
+	var idx := -1
+	for i in model_picker.item_count:
+		if model_picker.get_item_text(i) == model_name:
+			idx = i
+			break
+	if idx == -1 and not model_name.strip_edges().is_empty():
+		model_picker.add_item(model_name.strip_edges())
+		idx = model_picker.item_count - 1
+	if idx != -1:
+		model_picker.select(idx)
+
+
+func _on_settings_saved() -> void:
+	if client == null:
+		return
+	if api_key_field != null:
+		client.api_key = api_key_field.text.strip_edges()
+	if endpoint_field != null:
+		client.api_url = endpoint_field.text.strip_edges()
+	if model_picker != null and model_picker.selected >= 0:
+		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
+		if not picked.is_empty():
+			client.model = picked
+	client.save_config()
+	client.load_config()
 
 
 func _make_title(text: String) -> String:
