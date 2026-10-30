@@ -60,6 +60,10 @@ func _ready() -> void:
 	client.streaming = true
 	client.stream_updated.connect(_on_ai_stream)
 	client.retry_scheduled.connect(_on_ai_retry)
+	# Declare editor actions; the model may answer with structured calls,
+	# rendered as text until Phase 2 executes them.
+	client.tools = AiClient.default_tools() # Set to [] to use less tokens by not using tools
+	client.tool_calls_received.connect(_on_ai_tool_calls)
 	var custom_url := OS.get_environment("MODEL_API_URL").strip_edges()
 	if not custom_url.is_empty():
 		client.api_url = custom_url
@@ -210,6 +214,24 @@ func _on_ai_response(text: String) -> void:
 	pending_ai_message = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
+	_on_user_input_box_text_changed()
+
+
+# Render structured actions as text until Phase 2 executes them.
+func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
+	var lines: Array[String] = []
+	if not preamble.strip_edges().is_empty():
+		lines.append(preamble.strip_edges())
+	lines.append("Planned actions (not executed yet):")
+	for call in calls:
+		if call is Dictionary:
+			lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+	var rendered := "\n".join(lines)
+	if pending_ai_message != null and is_instance_valid(pending_ai_message):
+		pending_ai_message.set_message_text(rendered)
+	pending_ai_message = null
+	if not current_chat.is_empty() and current_chat.has("messages"):
+		_record_message("assistant", rendered)
 	_on_user_input_box_text_changed()
 
 
