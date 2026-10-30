@@ -9,7 +9,7 @@ signal stream_updated(full_text: String)
 signal retry_scheduled(next_attempt: int, total_attempts: int, delay_sec: float)
 signal tool_calls_received(calls: Array, preamble: String)
 
-const URL := "https://api.meta.ai/v1/chat/completions" # API Url
+const DEFAULT_API_URL := "https://api.meta.ai/v1/chat/completions" # verified: dev.meta.ai/docs
 const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
 const SETTINGS_API_URL := "plugins/gd_ai/api_url"
 const SETTINGS_MODEL := "plugins/gd_ai/model"
@@ -20,7 +20,7 @@ var reasoning_effort := "minimal"   # "minimal" | "low" | "medium" | "high" | "x
 var system_prompt := ""         # sent as a developer message, never stored in chat history
 var max_completion_tokens := 64 #2048
 var busy := false
-var api_url := URL # override (e.g. via MODEL_API_URL) to test another endpoint without editing code
+var api_url := "" # override endpoint (empty = DEFAULT_API_URL); via settings, code, or MODEL_API_URL
 var streaming := false # when true, send() uses stream:true with chunked SSE append
 var stream_timeout := 120.0 # seconds for the whole streamed request
 var max_retries := 3 # automatic retries for transient failures (429, 5xx, timeouts, network errors)
@@ -103,8 +103,7 @@ func load_config() -> void:
 		push_warning("[GdAI] No API key configured. Open GdAI Settings or set MODEL_API_KEY.")
 		return
 	var source := "env" if not env_key.is_empty() else "settings"
-	var endpoint := api_url if not api_url.is_empty() else URL
-	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]." % [model, endpoint, fingerprint(api_key), source])
+	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]." % [model, _effective_url(), fingerprint(api_key), source])
 
 
 # Persists the current key, endpoint, and model for the next session.
@@ -193,9 +192,7 @@ func _start_request() -> void:
 	_apply_tool_fields(payload)
 	var body := JSON.stringify(payload)
 
-	var url := api_url.strip_edges() # Strip URL
-	if url.is_empty():
-		url = URL
+	var url := _effective_url()
 
 	# Send POST request
 	var err := _http.request(url, headers, HTTPClient.METHOD_POST, body)
@@ -376,6 +373,13 @@ func _effective_context_prompt() -> String:
 	return context
 
 
+func _effective_url() -> String:
+	var url := api_url.strip_edges()
+	if url.is_empty():
+		return DEFAULT_API_URL
+	return url
+
+
 # Apply tool field
 func _apply_tool_fields(payload: Dictionary) -> void:
 	if _json_fallback_active:
@@ -408,9 +412,7 @@ func _process(_delta: float) -> void:
 
 # Starts a stream:true request polled through HTTPClient (HTTPRequest can't stream).
 func _send_stream(messages: Array, key: String) -> void:
-	var url := api_url.strip_edges()
-	if url.is_empty():
-		url = URL
+	var url := _effective_url()
 	var parts := _parse_url(url)
 	if parts.is_empty():
 		request_failed.emit("Invalid API endpoint URL.")
@@ -1097,7 +1099,7 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 		400:
 			return "Bad request. (%s)" % shown
 		401:
-			return "Invalid or missing API key. (%s) Use a key from dev.meta.ai API keys (starts with LLM_), add a billing card (no free tier), fully quit and relaunch Godot. Endpoint: %s" % [shown, api_url]
+			return "Invalid or missing API key. (%s) Use a key from dev.meta.ai API keys (starts with LLM_), add a billing card (no free tier), fully quit and relaunch Godot. Endpoint: %s" % [shown, _effective_url()]
 		402:
 			return "Billing issue on your Meta Model API account. (%s)" % shown
 		403:
