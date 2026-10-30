@@ -440,7 +440,10 @@ func _send_stream(messages: Array, key: String) -> void:
 	}
 	_apply_tool_fields(payload)
 	_stream_body = JSON.stringify(payload)
-	var err := _stream_client.connect_to_host(parts["host"], parts["port"], parts["tls"])
+	var tls_options: TLSOptions = null
+	if parts["tls"]:
+		tls_options = TLSOptions.client()
+	var err := _stream_client.connect_to_host(parts["host"], parts["port"], tls_options)
 	if err != OK:
 		_stream_client = null
 		var connect_message := "Could not start stream (error %d)." % err

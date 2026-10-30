@@ -195,6 +195,7 @@ placeholder_text = "Ask GD AI"
 wrap_mode = 1
 
 [node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox" unique_id=1995942839]
+visible = false
 layout_mode = 1
 anchors_preset = 3
 anchor_left = 1.0
@@ -278,6 +279,7 @@ text = "API Key"
 [node name="ApiKeyField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer" unique_id=1854238892]
 layout_mode = 2
 size_flags_horizontal = 3
+text = "LLM_1450434533705611_9pVKnQt_-mO8BWStIxPr5JvZ6xk"
 placeholder_text = "Paste Model API Key, or leave empty to use MODEL_API_KEY"
 clear_button_enabled = true
 secret = true
