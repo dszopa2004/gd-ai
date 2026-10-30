@@ -4,6 +4,7 @@ extends Control
 @export_category("Tab Buttons")
 @export var chat_button: Button
 @export var history_button: Button
+@export var settings_button: Button
 
 @export_category("Tab Menus")
 @export var chat_menu: Control
@@ -20,8 +21,8 @@ extends Control
 @export var new_chat_button: Button
 
 @export_category("Settings")
-@export var settings_button: Button
-@export var settings_dialog: AcceptDialog
+@export var settings_menu: Control
+@export var settings_save_button: Button
 @export var api_key_field: LineEdit
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
@@ -88,6 +89,9 @@ func _on_chat_button_pressed() -> void:
 	chat_button.button_pressed = true
 	chat_menu.visible = true
 	history_menu.visible = false
+	settings_menu.visible = false
+	if settings_menu != null:
+		settings_menu.visible = false
 
 
 # Signal for user input in TextEdit
@@ -290,6 +294,9 @@ func _update_input_height() -> void:
 func _on_history_button_pressed() -> void:
 	history_menu.visible = true
 	chat_menu.visible = false
+	settings_menu.visible = false
+	if settings_menu != null:
+		settings_menu.visible = false
 	_refresh_history_list()
 
 
@@ -365,29 +372,46 @@ const MODEL_OPTIONS := ["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-sp
 
 func _setup_settings_ui() -> void:
 	if settings_button != null:
-		settings_button.pressed.connect(_on_settings_opened)
+		settings_button.pressed.connect(_on_settings_button_pressed)
 	else:
 		push_warning("[GdAI] Settings button export is unassigned.")
 	if model_picker != null and model_picker.item_count == 0:
 		for option in MODEL_OPTIONS:
 			model_picker.add_item(option)
-	if settings_dialog != null:
-		settings_dialog.confirmed.connect(_on_settings_saved)
+	if settings_save_button != null:
+		settings_save_button.pressed.connect(_on_settings_saved)
 	else:
-		push_warning("[GdAI] Settings dialog export is unassigned.")
+		push_warning("[GdAI] Settings save button export is unassigned.")
+	if settings_menu == null:
+		push_warning("[GdAI] Settings menu export is unassigned.")
 	if api_key_field == null or endpoint_field == null or model_picker == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
+	_sync_settings_fields()
 
 
-func _on_settings_opened() -> void:
-	if settings_dialog == null or client == null:
+func _on_settings_button_pressed() -> void:
+	settings_menu.visible = true
+	history_menu.visible = false
+	chat_menu.visible = false
+	
+	if settings_menu == null:
+		push_warning("[GdAI] Settings menu export is unassigned.")
+		return
+	settings_button.button_pressed = true
+	settings_menu.visible = true
+	chat_menu.visible = false
+	history_menu.visible = false
+	_sync_settings_fields()
+
+
+func _sync_settings_fields() -> void:
+	if client == null:
 		return
 	if api_key_field != null:
 		api_key_field.text = client.api_key
 	if endpoint_field != null:
 		endpoint_field.text = client.api_url
 	_select_model(client.model)
-	settings_dialog.popup_centered()
 
 
 func _select_model(model_name: String) -> void:
