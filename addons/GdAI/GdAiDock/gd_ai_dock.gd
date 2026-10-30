@@ -384,6 +384,7 @@ func _scene_rel_path(root: Node, node: Node) -> String:
 const MODEL_OPTIONS := ["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.2", "muse-spark-1.1"]
 
 
+# Set up settings UI
 func _setup_settings_ui() -> void:
 	if settings_button != null:
 		settings_button.pressed.connect(_on_settings_button_pressed)
@@ -403,6 +404,7 @@ func _setup_settings_ui() -> void:
 	_sync_settings_fields()
 
 
+# Handle settings button press
 func _on_settings_button_pressed() -> void:
 	settings_menu.visible = true
 	history_menu.visible = false
@@ -418,6 +420,7 @@ func _on_settings_button_pressed() -> void:
 	_sync_settings_fields()
 
 
+# Sync setting fields
 func _sync_settings_fields() -> void:
 	if client == null:
 		return
@@ -428,6 +431,7 @@ func _sync_settings_fields() -> void:
 	_select_model(client.model)
 
 
+# Select model
 func _select_model(model_name: String) -> void:
 	if model_picker == null:
 		return
@@ -443,6 +447,7 @@ func _select_model(model_name: String) -> void:
 		model_picker.select(idx)
 
 
+# Save settings
 func _on_settings_saved() -> void:
 	if client == null:
 		return
@@ -458,6 +463,7 @@ func _on_settings_saved() -> void:
 	client.load_config()
 
 
+# Set title
 func _make_title(text: String) -> String:
 	var line := text.split("\n")[0].strip_edges()
 	return line if line.length() <= 40 else line.substr(0, 40) + "…"
