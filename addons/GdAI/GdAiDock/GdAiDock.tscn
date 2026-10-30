@@ -44,12 +44,32 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
 
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_levkg"]
+bg_color = Color(0.20392157, 0.20392157, 0.20392157, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dbfrc"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_02nqv"]
+bg_color = Color(0.24115604, 0.24115604, 0.24115601, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_7770v"]
+bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_dq450"]
 bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -60,14 +80,20 @@ theme = ExtResource("1_10xtg")
 script = ExtResource("2_svh0w")
 chat_button = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/ChatButton")
 history_button = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/HistoryButton")
+settings_button = NodePath("BackgroundPanelContainer/VBoxContainer/TabButtons/SettingsButton")
 chat_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu")
 history_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu")
 chat_scroll = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer")
 message_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/ChatScrollContainer/MarginContainer/MessageListContainer")
 user_input_box = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox")
-send_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/SendButton")
+send_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox/SendButton")
 history_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/ScrollContainer/ChatHistoryVbox")
 new_chat_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer/NewChatButton")
+settings_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu")
+settings_save_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/MarginContainer/SaveButton")
+api_key_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer/ApiKeyField")
+endpoint_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer/EndpointField")
+model_picker = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer/ModelPicker")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -107,6 +133,16 @@ theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_wn14f")
 toggle_mode = true
 button_group = ExtResource("3_svh0w")
 text = "History"
+
+[node name="SettingsButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/TabButtons" unique_id=100920474]
+layout_mode = 2
+theme_override_styles/normal = SubResource("StyleBoxFlat_levkg")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_dbfrc")
+theme_override_styles/hover = SubResource("StyleBoxFlat_02nqv")
+theme_override_styles/hover_pressed = SubResource("StyleBoxFlat_7770v")
+toggle_mode = true
+button_group = ExtResource("3_svh0w")
+text = "Settings"
 
 [node name="OutputPanelBackground" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer" unique_id=865799881]
 layout_mode = 2
@@ -152,15 +188,24 @@ layout_mode = 2
 size_flags_vertical = 8
 
 [node name="UserInputBox" type="TextEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1797441289]
-custom_minimum_size = Vector2(0, 65)
+custom_minimum_size = Vector2(0, 39)
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "Ask GD AI"
 wrap_mode = 1
 
-[node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer" unique_id=1995942839]
+[node name="SendButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/ChatMenu/MarginContainer/VBoxContainer/UserInputContainer/UserInputBox" unique_id=1995942839]
 visible = false
-layout_mode = 2
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -75.0
+offset_top = -33.0
+grow_horizontal = 0
+grow_vertical = 0
 size_flags_vertical = 8
 text = "Send"
 
@@ -199,3 +244,82 @@ layout_mode = 2
 [node name="NewChatButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer" unique_id=569249112]
 layout_mode = 2
 text = "New Chat"
+
+[node name="SettingsMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=1285205619]
+visible = false
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu" unique_id=1812780837]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 5
+theme_override_constants/margin_top = 5
+theme_override_constants/margin_right = 5
+theme_override_constants/margin_bottom = 5
+
+[node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer" unique_id=1039437563]
+layout_mode = 2
+
+[node name="SettingsBox" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer" unique_id=1473557256]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="APIHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=554938498]
+layout_mode = 2
+
+[node name="ApiKeyLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer" unique_id=496605343]
+layout_mode = 2
+text = "API Key"
+
+[node name="ApiKeyField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer" unique_id=1854238892]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "LLM_1450434533705611_9pVKnQt_-mO8BWStIxPr5JvZ6xk"
+placeholder_text = "Paste Model API Key, or leave empty to use MODEL_API_KEY"
+clear_button_enabled = true
+secret = true
+
+[node name="EndpointHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1214479985]
+layout_mode = 2
+
+[node name="EndpointLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer" unique_id=1114036378]
+layout_mode = 2
+text = "Endpoint URL"
+
+[node name="EndpointField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer" unique_id=1864245712]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Default: https://api.meta.ai/v1/chat/completions"
+
+[node name="ModelHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=258786140]
+layout_mode = 2
+
+[node name="ModelLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer" unique_id=1792952237]
+layout_mode = 2
+text = "Model:"
+
+[node name="ModelPicker" type="OptionButton" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer" unique_id=500124937]
+layout_mode = 2
+size_flags_horizontal = 3
+selected = 1
+item_count = 4
+popup/item_0/text = "muse-spark-1.3"
+popup/item_0/id = 0
+popup/item_1/text = "muse-spark-1.3-contributor"
+popup/item_1/id = 1
+popup/item_2/text = "muse-spark-1.2"
+popup/item_2/id = 2
+popup/item_3/text = "muse-spark-1.1"
+popup/item_3/id = 3
+
+[node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer" unique_id=73023715]
+layout_mode = 2
+
+[node name="SaveButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/MarginContainer" unique_id=1771290411]
+layout_mode = 2
+text = "Save"
