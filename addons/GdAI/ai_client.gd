@@ -27,6 +27,8 @@ var tools: Array = [] # declared editor actions, sent as the tools array (empty 
 var tool_choice = "auto" # "auto" | "none" | "required", or {"type": "function", "function": {"name": ...}}
 var context_prompt := "" # fresh editor snapshot per request; never stored in chat history
 var max_context_chars := 4000 # clamp on injected context (<= 0 = unlimited)
+var max_history_messages := 20 # cap on history turns sent per request (<= 0 = unlimited)
+var max_history_chars := 8000 # cap on history text sent per request (<= 0 = unlimited)
 
 var _http: HTTPRequest
 var _stream_client: HTTPClient
@@ -48,6 +50,7 @@ var _expecting_response := false
 var _json_fallback_active := false
 var _stream_tool_calls: Dictionary = {}
 var _stream_tool_announced := false
+var _history_dropped := 0
 
 
 # Generate a new HTTP request upon instantiation
@@ -66,6 +69,55 @@ func _ensure_http() -> void:
 	_http.request_completed.connect(_on_request_completed)
 
 
+const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
+const SETTINGS_API_URL := "plugins/gd_ai/api_url"
+const SETTINGS_MODEL := "plugins/gd_ai/model"
+
+
+static func _get_editor_setting(settings: EditorSettings, key: String) -> String:
+	if settings.has_setting(key):
+		return str(settings.get_setting(key))
+	return ""
+
+
+# Loads persisted config, with environment variables overriding when set.
+func load_config() -> void:
+	var stored_key := ""
+	var stored_url := ""
+	var stored_model := ""
+	if Engine.is_editor_hint():
+		var settings := EditorInterface.get_editor_settings()
+		stored_key = _get_editor_setting(settings, SETTINGS_API_KEY)
+		stored_url = _get_editor_setting(settings, SETTINGS_API_URL)
+		stored_model = _get_editor_setting(settings, SETTINGS_MODEL)
+	api_key = stored_key.strip_edges()
+	api_url = stored_url.strip_edges()
+	if not stored_model.strip_edges().is_empty():
+		model = stored_model.strip_edges()
+	var env_key := OS.get_environment("MODEL_API_KEY").strip_edges()
+	if not env_key.is_empty():
+		api_key = env_key
+	var env_url := OS.get_environment("MODEL_API_URL").strip_edges()
+	if not env_url.is_empty():
+		api_url = env_url
+	if api_key.is_empty():
+		push_warning("[GdAI] No API key configured. Open GdAI Settings or set MODEL_API_KEY.")
+		return
+	var source := "env" if not env_key.is_empty() else "settings"
+	var endpoint := api_url if not api_url.is_empty() else URL
+	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]." % [model, endpoint, fingerprint(api_key), source])
+
+
+# Persists the current key, endpoint, and model for the next session.
+func save_config() -> void:
+	if not Engine.is_editor_hint():
+		return
+	var settings := EditorInterface.get_editor_settings()
+	settings.set_setting(SETTINGS_API_KEY, api_key.strip_edges())
+	settings.set_setting(SETTINGS_API_URL, api_url.strip_edges())
+	settings.set_setting(SETTINGS_MODEL, model.strip_edges())
+
+
 # Sends a message to ai with adjusted settings
 # Throw error if HTTP request could not be started
 func send(messages: Array) -> void:
@@ -81,7 +133,11 @@ func send(messages: Array) -> void:
 	if key.contains(" ") or key.contains("\t") or key.contains("\n") or key.contains("\r"):
 		request_failed.emit("API key contains spaces or line breaks. Re-copy it without quotes or extra characters.")
 		return
-	_pending_messages = messages.duplicate()
+	var trimmed := trim_history(messages, max_history_messages, max_history_chars)
+	_pending_messages = trimmed["messages"]
+	_history_dropped = int(trimmed["dropped"])
+	if _history_dropped > 0:
+		print("[GdAI] Trimmed %d oldest %s to fit the history budget." % [_history_dropped, "message" if _history_dropped == 1 else "messages"])
 	_retry_attempt = 0
 	_json_fallback_active = false
 	_request_generation += 1
@@ -118,6 +174,8 @@ func _start_request() -> void:
 	var context := _effective_context_prompt()
 	if not context.is_empty():
 		payload_messages.append({"role": "developer", "content": context})
+	if _history_dropped > 0:
+		payload_messages.append({"role": "developer", "content": "[History note: %d oldest %s trimmed to fit the budget.]" % [_history_dropped, "message" if _history_dropped == 1 else "messages"]})
 	payload_messages.append_array(_pending_messages)
 
 	# Set HTTP headers
@@ -331,6 +389,7 @@ func cancel() -> void:
 	_request_generation += 1 # invalidates any scheduled retry
 	_expecting_response = false
 	_pending_messages = []
+	_history_dropped = 0
 	if _http != null:
 		_http.cancel_request()
 	if _streaming_active:
@@ -361,6 +420,8 @@ func _send_stream(messages: Array, key: String) -> void:
 	var context := _effective_context_prompt()
 	if not context.is_empty():
 		payload_messages.append({"role": "developer", "content": context})
+	if _history_dropped > 0:
+		payload_messages.append({"role": "developer", "content": "[History note: %d oldest %s trimmed to fit the budget.]" % [_history_dropped, "message" if _history_dropped == 1 else "messages"]})
 	payload_messages.append_array(messages)
 
 	_stream_client = HTTPClient.new()
@@ -770,6 +831,30 @@ static func _content_to_text(content) -> String:
 				parts.append(str(part.get("text", part.get("content", ""))))
 		return "".join(parts)
 	return str(content)
+
+
+# Keeps the most recent history within both budgets. Never mutates the input.
+# Returns {"messages": [...], "dropped": n}. At least one message is always kept.
+static func trim_history(messages: Array, max_messages: int, max_chars: int) -> Dictionary:
+	var kept: Array = []
+	var chars := 0
+	var count := 0
+	for i in range(messages.size() - 1, -1, -1):
+		var msg = messages[i]
+		if max_messages > 0 and count >= max_messages:
+			break
+		var text := ""
+		if msg is Dictionary:
+			text = _content_to_text(msg.get("content", ""))
+		if max_chars > 0 and count > 0 and chars + text.length() > max_chars:
+			break
+		kept.push_front(msg)
+		chars += text.length()
+		count += 1
+	# Keep payloads starting on a user turn (Phase 2: extend for tool pairs).
+	if not kept.is_empty() and kept[0] is Dictionary and str(kept[0].get("role", "")) == "assistant":
+		kept.pop_front()
+	return {"messages": kept, "dropped": messages.size() - kept.size()}
 
 
 static func _looks_like_tools_unsupported(parsed) -> bool:
