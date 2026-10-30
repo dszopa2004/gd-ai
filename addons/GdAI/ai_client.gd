@@ -7,6 +7,7 @@ signal response_received(text: String)
 signal request_failed(message: String)
 signal stream_updated(full_text: String)
 signal retry_scheduled(next_attempt: int, total_attempts: int, delay_sec: float)
+signal tool_calls_received(calls: Array, preamble: String)
 
 const URL := "https://api.meta.ai/v1/chat/completions" # API Url
 
@@ -22,6 +23,8 @@ var stream_timeout := 120.0 # seconds for the whole streamed request
 var max_retries := 3 # automatic retries for transient failures (429, 5xx, timeouts, network errors)
 var retry_base_delay := 1.0 # seconds; doubles per attempt, plus jitter
 var retry_max_delay := 30.0 # seconds; ceiling for backoff (a Retry-After header can extend past it)
+var tools: Array = [] # declared editor actions, sent as the tools array (empty = plain chat)
+var tool_choice = "auto" # "auto" | "none" | "required", or {"type": "function", "function": {"name": ...}}
 
 var _http: HTTPRequest
 var _stream_client: HTTPClient
@@ -40,6 +43,9 @@ var _pending_messages: Array = []
 var _retry_attempt := 0
 var _request_generation := 0
 var _expecting_response := false
+var _json_fallback_active := false
+var _stream_tool_calls: Dictionary = {}
+var _stream_tool_announced := false
 
 
 # Generate a new HTTP request upon instantiation
@@ -75,6 +81,7 @@ func send(messages: Array) -> void:
 		return
 	_pending_messages = messages.duplicate()
 	_retry_attempt = 0
+	_json_fallback_active = false
 	_request_generation += 1
 	_start_request()
 
@@ -91,7 +98,7 @@ func _start_request() -> void:
 		return
 
 	# Handle if already streaming
-	if streaming:
+	if streaming and not _json_fallback_active:
 		_send_stream(_pending_messages, key)
 		return
 
@@ -103,8 +110,9 @@ func _start_request() -> void:
 
 	# Set payload messages
 	var payload_messages: Array = []
-	if not system_prompt.is_empty():
-		payload_messages.append({"role": "developer", "content": system_prompt})
+	var effective_system := _effective_system_prompt()
+	if not effective_system.is_empty():
+		payload_messages.append({"role": "developer", "content": effective_system})
 	payload_messages.append_array(_pending_messages)
 
 	# Set HTTP headers
@@ -114,12 +122,14 @@ func _start_request() -> void:
 	])
 
 	# Create JSON body and fill settings
-	var body := JSON.stringify({
+	var payload := {
 		"model": model,
 		"messages": payload_messages,
 		"reasoning_effort": reasoning_effort,
 		"max_completion_tokens": max_completion_tokens,
-	})
+	}
+	_apply_tool_fields(payload)
+	var body := JSON.stringify(payload)
 
 	var url := api_url.strip_edges() # Strip URL
 	if url.is_empty():
@@ -171,6 +181,137 @@ static func fingerprint(raw: String) -> String:
 	return "len=%d %s…%s" % [key.length(), key.left(4), key.substr(key.length() - 2)]
 
 
+# Declared editor actions, in OpenAI tools format. Phase 2 executes these;
+# Phase 3 only sends the schema and parses/validates the returned calls.
+static func default_tools() -> Array:
+	return [
+		{
+			"type": "function",
+			"function": {
+				"name": "create_node",
+				"description": "Create a new node in the edited scene.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node_type": {"type": "string", "description": "Godot class name, e.g. Button, VBoxContainer, Node3D."},
+						"name": {"type": "string", "description": "Node name. Defaults to the node type."},
+						"parent": {"type": "string", "description": "Path of the parent node. Defaults to the scene root."},
+					},
+					"required": ["node_type"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "set_property",
+				"description": "Set a property on a node in the edited scene.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node": {"type": "string", "description": "Path of the target node."},
+						"property": {"type": "string", "description": "Property name, e.g. text, position, visible."},
+						"value": {"description": "New value (any JSON type)."},
+					},
+					"required": ["node", "property", "value"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "attach_script",
+				"description": "Attach a script to a node in the edited scene.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node": {"type": "string", "description": "Path of the target node."},
+						"script_path": {"type": "string", "description": "Resource path of the script, e.g. res://player.gd."},
+					},
+					"required": ["node", "script_path"],
+					"additionalProperties": false,
+				},
+			},
+		},
+	]
+
+
+# One-line signature for the JSON-mode fallback instruction, built from the schema.
+static func _tool_signature(tool_def) -> String:
+	if not tool_def is Dictionary:
+		return ""
+	var fn = tool_def.get("function", {})
+	if not fn is Dictionary:
+		return ""
+	var fname := str(fn.get("name", ""))
+	if fname.is_empty():
+		return ""
+	var properties := {}
+	var required: Array = []
+	var params = fn.get("parameters", {})
+	if params is Dictionary:
+		if params.get("properties", {}) is Dictionary:
+			properties = params["properties"]
+		if params.get("required", []) is Array:
+			required = params["required"]
+	var parts: Array[String] = []
+	for pname in properties.keys():
+		var spec = properties[pname]
+		var ptype := "any"
+		if spec is Dictionary and spec.get("type", "") is String and not str(spec.get("type", "")).is_empty():
+			ptype = str(spec["type"])
+		var mark := ""
+		if not required.has(pname):
+			mark = "?"
+		parts.append("%s%s: %s" % [str(pname), mark, ptype])
+	var sig := "%s(%s)" % [fname, ", ".join(parts)]
+	var desc := str(fn.get("description", ""))
+	if not desc.is_empty():
+		sig += ": " + desc
+	return sig
+
+
+# Instruction used when the endpoint rejects tools: answer in strict JSON instead.
+func _json_fallback_instruction() -> String:
+	var lines: Array[String] = []
+	lines.append("You have no function-calling ability. Always reply with exactly one JSON object, nothing else: {\"actions\": [{\"name\": \"<action>\", \"arguments\": {<params as a JSON object>}}], \"reply\": \"<chat text>\"}.")
+	lines.append("Use ONLY these actions:")
+	for t in tools:
+		var sig := _tool_signature(t)
+		if not sig.is_empty():
+			lines.append("- " + sig)
+	lines.append("Put ordinary chat text in \"reply\" (\"\" if none). Use \"actions\": [] when no editor action is needed.")
+	return "\n".join(lines)
+
+
+func _effective_tool_choice() -> Variant:
+	if tool_choice is Dictionary:
+		return tool_choice
+	if tool_choice is String and tool_choice in ["auto", "none", "required"]:
+		return tool_choice
+	return "auto"
+
+
+func _effective_system_prompt() -> String:
+	if not _json_fallback_active:
+		return system_prompt
+	if system_prompt.is_empty():
+		return _json_fallback_instruction()
+	return system_prompt + "\n\n" + _json_fallback_instruction()
+
+
+func _apply_tool_fields(payload: Dictionary) -> void:
+	if _json_fallback_active:
+		payload["response_format"] = {"type": "json_object"}
+		return
+	if tools.is_empty():
+		return
+	payload["tools"] = tools
+	payload["tool_choice"] = _effective_tool_choice()
+
+
 # Cancels the HTTP request
 func cancel() -> void:
 	_request_generation += 1 # invalidates any scheduled retry
@@ -200,8 +341,9 @@ func _send_stream(messages: Array, key: String) -> void:
 		return
 
 	var payload_messages: Array = []
-	if not system_prompt.is_empty():
-		payload_messages.append({"role": "developer", "content": system_prompt})
+	var effective_system := _effective_system_prompt()
+	if not effective_system.is_empty():
+		payload_messages.append({"role": "developer", "content": effective_system})
 	payload_messages.append_array(messages)
 
 	_stream_client = HTTPClient.new()
@@ -211,13 +353,15 @@ func _send_stream(messages: Array, key: String) -> void:
 		"Content-Type: application/json",
 		"Accept: text/event-stream",
 	])
-	_stream_body = JSON.stringify({
+	var payload := {
 		"model": model,
 		"messages": payload_messages,
 		"reasoning_effort": reasoning_effort,
 		"max_completion_tokens": max_completion_tokens,
 		"stream": true,
-	})
+	}
+	_apply_tool_fields(payload)
+	_stream_body = JSON.stringify(payload)
 	var err := _stream_client.connect_to_host(parts["host"], parts["port"], parts["tls"])
 	if err != OK:
 		_stream_client = null
@@ -233,6 +377,8 @@ func _send_stream(messages: Array, key: String) -> void:
 	_stream_code = 0
 	_stream_leftover = ""
 	_stream_content = ""
+	_stream_tool_calls = {}
+	_stream_tool_announced = false
 	_stream_error_bytes = PackedByteArray()
 	_stream_deadline = Time.get_ticks_msec() + int(stream_timeout * 1000.0)
 	_streaming_active = true
@@ -367,6 +513,13 @@ func _handle_sse_line(line: String) -> void:
 	var delta = first.get("delta", {})
 	if not delta is Dictionary:
 		return
+	var call_deltas = delta.get("tool_calls", [])
+	if call_deltas is Array:
+		for raw in call_deltas:
+			_accumulate_tool_delta(raw)
+		if _stream_content.is_empty() and not _stream_tool_announced and not _stream_tool_calls.is_empty():
+			_stream_tool_announced = true
+			stream_updated.emit("Preparing actions…")
 	var piece = delta.get("content", "")
 	if piece is String and not piece.is_empty():
 		_stream_content += piece
@@ -389,7 +542,24 @@ static func _stream_error_message(err) -> String:
 # Finish stream
 func _finish_stream_success() -> void:
 	var content := _stream_content
+	var tool_slots: Dictionary = _stream_tool_calls
 	_cleanup_stream()
+	if not tool_slots.is_empty():
+		var raw_calls: Array = []
+		var indexes := tool_slots.keys()
+		indexes.sort()
+		for idx in indexes:
+			var slot: Dictionary = tool_slots[idx]
+			raw_calls.append({
+				"id": str(slot.get("id", "")),
+				"type": "function",
+				"function": {
+					"name": str(slot.get("name", "")),
+					"arguments": str(slot.get("arguments", "")),
+				},
+			})
+		_handle_native_tool_calls(raw_calls, content)
+		return
 	if content.is_empty():
 		request_failed.emit("Response had empty content.")
 	else:
@@ -415,6 +585,8 @@ func _finish_stream_error_from_body() -> void:
 	if _stream_client != null:
 		headers = _stream_client.get_response_headers()
 	_cleanup_stream()
+	if _maybe_start_json_fallback(code, parsed):
+		return
 	if _is_retryable_code(code) and _retry_attempt < max_retries:
 		var wait := 0.0
 		if code == 429:
@@ -427,6 +599,8 @@ func _finish_stream_error_from_body() -> void:
 # Cleanup stream
 func _cleanup_stream() -> void:
 	_streaming_active = false
+	_stream_tool_calls = {}
+	_stream_tool_announced = false
 	set_process(false)
 	if _stream_client != null:
 		_stream_client.close()
@@ -489,6 +663,243 @@ static func _parse_retry_after(headers: PackedStringArray) -> float:
 	return -1.0
 
 
+# Validates one parsed call against the declared tools. Returns "" when valid,
+# otherwise a human-readable reason. Static so Phase 2 can reuse it at execution time.
+static func validate_tool_call(tools_defs: Array, call_name: String, args: Variant) -> String:
+	var fn_def = null
+	for t in tools_defs:
+		if t is Dictionary and str(t.get("type", "function")) == "function":
+			var f = t.get("function", {})
+			if f is Dictionary and str(f.get("name", "")) == call_name:
+				fn_def = f
+				break
+	if fn_def == null:
+		return "unknown action (not in the declared tools)"
+	if not args is Dictionary:
+		return "arguments must be an object"
+	var params = fn_def.get("parameters", {})
+	if not params is Dictionary:
+		return ""
+	var properties = params.get("properties", {})
+	if not properties is Dictionary:
+		properties = {}
+	var required = params.get("required", [])
+	if required is Array:
+		for req in required:
+			if not args.has(req):
+				return "missing required parameter '%s'" % str(req)
+	var allow_extra := bool(params.get("additionalProperties", true))
+	for pname in args.keys():
+		if not properties.has(pname):
+			if not allow_extra:
+				return "unknown parameter '%s'" % str(pname)
+			continue
+		var spec = properties[pname]
+		if not spec is Dictionary or not spec.has("type"):
+			continue
+		var problem := _check_json_type(args[pname], str(spec["type"]))
+		if not problem.is_empty():
+			return "parameter '%s' %s" % [str(pname), problem]
+	return ""
+
+
+static func _check_json_type(value: Variant, want: String) -> String:
+	var is_bool := value is bool
+	match want:
+		"string":
+			if value is String:
+				return ""
+			return "must be a string"
+		"integer":
+			if (value is int) and not is_bool:
+				return ""
+			return "must be an integer"
+		"number":
+			if ((value is int) or (value is float)) and not is_bool:
+				return ""
+			return "must be a number"
+		"boolean":
+			if is_bool:
+				return ""
+			return "must be a boolean"
+		"object":
+			if value is Dictionary:
+				return ""
+			return "must be an object"
+		"array":
+			if value is Array:
+				return ""
+			return "must be an array"
+		"null":
+			if value == null:
+				return ""
+			return "must be null"
+		_:
+			return ""
+
+
+# Normalizes message content (string, parts array, or null) to plain text.
+static func _content_to_text(content) -> String:
+	if content == null:
+		return ""
+	if content is String:
+		return content
+	if content is Array:
+		var parts: Array[String] = []
+		for part in content:
+			if part is String:
+				parts.append(part)
+			elif part is Dictionary:
+				parts.append(str(part.get("text", part.get("content", ""))))
+		return "".join(parts)
+	return str(content)
+
+
+static func _looks_like_tools_unsupported(parsed) -> bool:
+	if not parsed is Dictionary:
+		return false
+	var err = parsed.get("error", null)
+	var code_str := ""
+	var message := ""
+	if err is Dictionary:
+		code_str = str(err.get("code", ""))
+		message = str(err.get("message", ""))
+	elif err is String:
+		message = err
+	var hay := (code_str + " " + message).to_lower()
+	if hay.strip_edges().is_empty() or not hay.contains("tool"):
+		return false
+	return hay.contains("support") or hay.contains("unknown") or hay.contains("invalid") \
+		or hay.contains("unrecognized") or hay.contains("parameter") or hay.contains("field")
+
+
+# If the endpoint rejected the tools parameter, re-issue once as JSON-mode
+# single-shot. Returns true when the fallback request was started.
+func _maybe_start_json_fallback(code: int, parsed) -> bool:
+	if _json_fallback_active or tools.is_empty():
+		return false
+	if code != 400:
+		return false
+	if not _looks_like_tools_unsupported(parsed):
+		return false
+	_json_fallback_active = true
+	print("[GdAI] Endpoint rejected tools; retrying in JSON mode.")
+	_start_request()
+	return true
+
+
+func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
+	var calls: Array = []
+	var stamp := Time.get_ticks_msec()
+	var index := 0
+	for raw in raw_calls:
+		if not raw is Dictionary:
+			request_failed.emit("Invalid tool call: entry %d is not an object." % index)
+			return
+		var fn = raw.get("function", {})
+		if not fn is Dictionary:
+			request_failed.emit("Invalid tool call: entry %d has no function object." % index)
+			return
+		var fname := str(fn.get("name", ""))
+		var args_raw = fn.get("arguments", "")
+		var args := {}
+		if args_raw is String:
+			if not args_raw.strip_edges().is_empty():
+				var parsed_args = JSON.parse_string(args_raw)
+				if parsed_args == null or not parsed_args is Dictionary:
+					request_failed.emit("Invalid action '%s': arguments are not a JSON object." % fname)
+					return
+				args = parsed_args
+		elif args_raw is Dictionary:
+			args = args_raw
+		else:
+			request_failed.emit("Invalid action '%s': arguments must be an object." % fname)
+			return
+		var problem := validate_tool_call(tools, fname, args)
+		if not problem.is_empty():
+			request_failed.emit("Invalid action '%s': %s" % [fname, problem])
+			return
+		var call_id := str(raw.get("id", ""))
+		if call_id.is_empty():
+			call_id = "call_native_%d_%d" % [stamp, index]
+		calls.append({"id": call_id, "name": fname, "arguments": args})
+		index += 1
+	if calls.is_empty():
+		if preamble.is_empty():
+			request_failed.emit("Response had empty content.")
+		else:
+			response_received.emit(preamble)
+		return
+	tool_calls_received.emit(calls, preamble)
+
+
+func _handle_fallback_json(text: String) -> void:
+	if text.is_empty():
+		request_failed.emit("Response had empty content.")
+		return
+	var parsed = JSON.parse_string(text)
+	if parsed == null:
+		response_received.emit(text)
+		return
+	if not parsed is Dictionary:
+		request_failed.emit("Invalid action JSON: top level must be an object.")
+		return
+	if not parsed.has("actions"):
+		request_failed.emit("Invalid action JSON: missing \"actions\".")
+		return
+	var actions = parsed["actions"]
+	if not actions is Array:
+		request_failed.emit("Invalid action JSON: \"actions\" must be an array.")
+		return
+	var preamble := str(parsed.get("reply", ""))
+	if actions.is_empty():
+		if preamble.is_empty():
+			request_failed.emit("Response had empty content.")
+		else:
+			response_received.emit(preamble)
+		return
+	var calls: Array = []
+	var stamp := Time.get_ticks_msec()
+	var index := 0
+	for action in actions:
+		if not action is Dictionary:
+			request_failed.emit("Invalid action JSON: actions[%d] must be an object." % index)
+			return
+		var fname := str(action.get("name", ""))
+		var args = action.get("arguments", {})
+		var problem := validate_tool_call(tools, fname, args)
+		if not problem.is_empty():
+			request_failed.emit("Invalid action '%s': %s" % [fname, problem])
+			return
+		calls.append({
+			"id": "call_json_%d_%d" % [stamp, index],
+			"name": fname,
+			"arguments": args,
+		})
+		index += 1
+	tool_calls_received.emit(calls, preamble)
+
+
+func _accumulate_tool_delta(raw) -> void:
+	if not raw is Dictionary:
+		return
+	var idx := int(raw.get("index", 0))
+	if not _stream_tool_calls.has(idx):
+		_stream_tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
+	var slot: Dictionary = _stream_tool_calls[idx]
+	var rid := str(raw.get("id", ""))
+	if not rid.is_empty():
+		slot["id"] = rid
+	var rfn = raw.get("function", {})
+	if rfn is Dictionary:
+		var rname := str(rfn.get("name", ""))
+		if not rname.is_empty():
+			slot["name"] = rname
+		var rargs = rfn.get("arguments", "")
+		if rargs is String:
+			slot["arguments"] = str(slot["arguments"]) + rargs
+
+
 # Handles what happens when a request is complete
 func _on_request_completed(result: int, code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
 	if not _expecting_response:
@@ -508,6 +919,8 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 
 	# If there is an error code, check what the error code was
 	if code != 200:
+		if _maybe_start_json_fallback(code, parsed):
+			return
 		if _is_retryable_code(code) and _retry_attempt < max_retries:
 			var wait := 0.0
 			if code == 429:
@@ -528,7 +941,7 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 		request_failed.emit("Response had no choices.")
 		return
 
-	# Get the message and send the response message to the dock
+	# Get the message and send the response message (or structured actions) to the dock
 	var first = choices[0]
 	if not first is Dictionary:
 		request_failed.emit("Unexpected response from server.")
@@ -537,21 +950,18 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 	if not message is Dictionary:
 		request_failed.emit("Unexpected response from server.")
 		return
-	var content = message.get("content", "")
-	if content is Array:
-		var parts: Array[String] = []
-		for part in content:
-			if part is String:
-				parts.append(part)
-			elif part is Dictionary:
-				parts.append(str(part.get("text", part.get("content", ""))))
-		content = "".join(parts)
-	if not content is String:
-		content = str(content)
-	if content.is_empty():
+	var raw_calls = message.get("tool_calls", [])
+	var text := _content_to_text(message.get("content", ""))
+	if raw_calls is Array and not raw_calls.is_empty():
+		_handle_native_tool_calls(raw_calls, text)
+		return
+	if _json_fallback_active:
+		_handle_fallback_json(text)
+		return
+	if text.is_empty():
 		request_failed.emit("Response had empty content.")
 		return
-	response_received.emit(content)
+	response_received.emit(text)
 
 
 # Describes the error based on error code
