@@ -52,6 +52,8 @@ var _loop_active := false
 var _loop_transcript: Array = [] # request-scoped assistant tool pairs + tool results; never stored in chat history
 var _loop_count := 0 # tool turns received this user message
 var _loop_generation := 0 # user-message stamp; an approval from an older generation never continues the loop
+var _continue_button = null # live Continue button, if a capped turn is resumable
+var _continue_generation := -1 # user-message stamp the live Continue button belongs to
 
 func _ready() -> void:
 	# Tab button signals
@@ -287,7 +289,9 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 				var mark := "✓" if bool(result.get("ok", false)) else "✗"
 				lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
 		if capped:
-			lines.append("(Loop limit reached — say 'continue' to go on.)")
+			lines.append("(Loop limit reached — press Continue to go on.)")
+		if _turn_has_finish(calls) and _turn_has_real_action(calls):
+			lines.append("(The model called finish with other actions — press Continue if more work remains.)")
 	if needs_approval:
 		var scene_root := EditorInterface.get_edited_scene_root()
 		if scene_root == null:
@@ -313,6 +317,8 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	_on_user_input_box_text_changed()
 	if not needs_approval and not calls.is_empty():
 		_after_tool_turn(preamble, calls, turn_results, capped)
+	if (capped or _turn_has_finish(calls)) and not needs_approval and not calls.is_empty() and not _loop_transcript.is_empty():
+		_show_continue_row()
 
 
 # Approval policy: a turn pauses for approval only if it contains a
@@ -378,11 +384,15 @@ func _on_approve_pressed() -> void:
 		# never feed stale results into the new turn's loop.
 		lines.append("(Superseded by a newer request — not fed back.)")
 	elif bool(pending.get("capped", false)):
-		lines.append("(Loop limit reached — say 'continue' to go on.)")
+		lines.append("(Loop limit reached — press Continue to go on.)")
+	if _turn_has_finish(turn_calls) and _turn_has_real_action(turn_calls):
+		lines.append("(The model called finish with other actions — press Continue if more work remains.)")
 	_update_pending_record(pending, "\n".join(lines))
 	_on_user_input_box_text_changed()
 	if not stale:
 		_after_tool_turn(str(pending.get("preamble", "")), turn_calls, turn_results, bool(pending.get("capped", false)))
+	if not stale and (bool(pending.get("capped", false)) or _turn_has_finish(turn_calls)) and not _loop_transcript.is_empty():
+		_show_continue_row()
 
 
 func _on_reject_pressed() -> void:
@@ -402,15 +412,28 @@ func _on_reject_pressed() -> void:
 func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bool) -> void:
 	if not _loop_active:
 		return
-	for call in calls:
-		if call is Dictionary and str(call.get("name", "")) == "finish":
-			_end_loop() # the model declared the task done; no follow-up
-			return
 	_append_loop_transcript(preamble, calls, results)
-	if capped:
-		_end_loop()
+	if _turn_has_finish(calls) and not _turn_has_real_action(calls):
+		_end_loop() # pure finish: clean done state
+		return
+	if _turn_has_finish(calls) or capped:
+		_pause_loop() # ambiguous ending or cap: halted, but resumable via Continue
 		return
 	_continue_loop()
+
+
+static func _turn_has_finish(calls: Array) -> bool:
+	for call in calls:
+		if call is Dictionary and str(call.get("name", "")) == "finish":
+			return true
+	return false
+
+
+static func _turn_has_real_action(calls: Array) -> bool:
+	for call in calls:
+		if call is Dictionary and str(call.get("name", "")) != "finish":
+			return true
+	return false
 
 
 func _append_loop_transcript(preamble: String, calls: Array, results: Array) -> void:
@@ -470,6 +493,56 @@ func _end_loop() -> void:
 	_loop_count = 0
 	if client != null:
 		client.tool_choice = "auto"
+
+
+# Capped halt: auto-continuation stops but the transcript is kept, so a manual
+# Continue resumes with full state. Cleared by the next send or a hard end.
+func _pause_loop() -> void:
+	_loop_active = false
+
+
+# Offer a one-shot Continue button under the capped turn's bubble. Only one
+# can be live: showing a new one retires the older.
+func _show_continue_row() -> void:
+	_retire_continue_button()
+	var btn := Button.new()
+	btn.text = "Continue"
+	btn.tooltip_text = "Resume the loop for up to %d more tool turns" % MAX_LOOP_TOOL_TURNS
+	btn.pressed.connect(_on_continue_pressed)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(btn)
+	row.add_child(spacer)
+	message_list.add_child(row)
+	_continue_button = btn
+	_continue_generation = _loop_generation
+
+
+func _retire_continue_button() -> void:
+	if _continue_button != null and is_instance_valid(_continue_button):
+		_continue_button.disabled = true
+		_continue_button.text = "Superseded"
+	_continue_button = null
+
+
+func _on_continue_pressed() -> void:
+	if _continue_button == null or not is_instance_valid(_continue_button):
+		return
+	if _continue_generation != _loop_generation:
+		_retire_continue_button()
+		return
+	if client == null or client.busy:
+		return
+	var btn = _continue_button
+	_continue_button = null
+	btn.disabled = true
+	btn.text = "Continuing…"
+	_loop_active = true
+	_loop_count = 0
+	_continue_loop()
 
 
 func _supersede_pending_approval() -> void:
@@ -1307,6 +1380,7 @@ func _make_title(text: String) -> String:
 
 # Clear message list
 func _clear_message_list() -> void:
+	_continue_button = null # rows (and the button) are freed below
 	if not _pending_approval.is_empty():
 		var pending: Dictionary = _pending_approval
 		_pending_approval = {}
