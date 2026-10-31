@@ -1,8 +1,11 @@
 extends Control
 
+@onready var start_button: Button = $CenterContainer/VBoxContainer/StartButton
+@onready var options_button: Button = $CenterContainer/VBoxContainer/OptionsButton
+
 func _ready() -> void:
-	$MenuContainer/VBox/StartButton.pressed.connect(_on_start_button_pressed)
-	$MenuContainer/VBox/OptionsButton.pressed.connect(_on_options_button_pressed)
+	start_button.pressed.connect(_on_start_button_pressed)
+	options_button.pressed.connect(_on_options_button_pressed)
 
 func _on_start_button_pressed() -> void:
 	print("Starting game")

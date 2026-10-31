@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://b36iyf7ksjmj8"]
 
 [ext_resource type="Script" uid="uid://c62uyav5qaxwt" path="res://Test/test_menu.gd" id="1_7cpfj"]
+[ext_resource type="PackedScene" uid="uid://bxbxuefdgrl8h" path="res://Test/Chip.tscn" id="2_mrusn"]
 
 [node name="TestMenu" type="Control" unique_id=1703448354]
 layout_mode = 3
@@ -11,7 +12,7 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_7cpfj")
 
-[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1173514478]
+[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1559263789]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -19,23 +20,29 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 
-[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer" unique_id=1138618637]
+[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer" unique_id=253247695]
 layout_mode = 2
 
-[node name="TitleLabel" type="Label" parent="CenterContainer/VBoxContainer" unique_id=1769850703]
+[node name="TitleLabel" type="Label" parent="CenterContainer/VBoxContainer" unique_id=1910429132]
 layout_mode = 2
 size_flags_horizontal = 4
-text = "Main Menu"
+text = "Locked?"
 horizontal_alignment = 1
 
-[node name="StartButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=344629657]
+[node name="StartButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1935671381]
 layout_mode = 2
-text = "Start Game"
+size_flags_horizontal = 4
+text = "Start"
 
-[node name="OptionsButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=827158205]
+[node name="OptionsButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=149383813]
 layout_mode = 2
+size_flags_horizontal = 4
 text = "Options"
 
-[node name="QuitButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=791119269]
+[node name="Chip" parent="CenterContainer/VBoxContainer" unique_id=1371377326 instance=ExtResource("2_mrusn")]
 layout_mode = 2
-text = "Quit"
+
+[node name="ChipLabel" parent="CenterContainer/VBoxContainer/Chip" index="0" unique_id=1983611781]
+text = "bye"
+
+[editable path="CenterContainer/VBoxContainer/Chip"]
