@@ -16,9 +16,9 @@ const SETTINGS_MODEL := "plugins/gd_ai/model"
 
 var api_key := ""
 var model := "muse-spark-1.3-contributor"
-var reasoning_effort := "minimal"   # "minimal" | "low" | "medium" | "high" | "xhigh" ("none" is rejected)
+var reasoning_effort := "low"   # "minimal" | "low" | "medium" | "high" | "xhigh" ("none" is rejected)
 var system_prompt := ""         # sent as a developer message, never stored in chat history
-var max_completion_tokens := 64 #2048
+var max_completion_tokens := 4096 # output cap is pay-per-use; reasoning + reply + tool calls share it, so 2048 truncates multi-op responses
 var busy := false
 var api_url := "" # override endpoint (empty = DEFAULT_API_URL); via settings, code, or MODEL_API_URL
 var streaming := false # when true, send() uses stream:true with chunked SSE append
@@ -52,6 +52,7 @@ var _request_generation := 0
 var _expecting_response := false
 var _json_fallback_active := false
 var _stream_tool_calls: Dictionary = {}
+var _stream_finish_reason := ""
 var _stream_tool_announced := false
 var _history_dropped := 0
 
@@ -241,7 +242,7 @@ static func fingerprint(raw: String) -> String:
 
 
 # Declared editor actions, in OpenAI tools format. Phase 2 executes these;
-# Phase 3 only sends the schema and parses/validates the returned calls.
+# returned calls are validated here before execution.
 static func default_tools() -> Array:
 	return [
 		{
@@ -254,9 +255,56 @@ static func default_tools() -> Array:
 					"properties": {
 						"node_type": {"type": "string", "description": "Godot class name, e.g. Button, VBoxContainer, Node3D."},
 						"name": {"type": "string", "description": "Node name. Defaults to the node type."},
-						"parent": {"type": "string", "description": "Path of the parent node. Defaults to the scene root."},
+						"parent": {"type": "string", "description": "Path of the parent node relative to the scene root (\".\" = root). Defaults to the scene root."},
 					},
 					"required": ["node_type"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "delete_node",
+				"description": "Delete a node and its children from the edited scene.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node": {"type": "string", "description": "Path of the node to delete."},
+					},
+					"required": ["node"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "rename_node",
+				"description": "Rename a node in the edited scene.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node": {"type": "string", "description": "Path of the node to rename."},
+						"name": {"type": "string", "description": "New node name."},
+					},
+					"required": ["node", "name"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "reparent_node",
+				"description": "Move a node to a new parent in the edited scene.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node": {"type": "string", "description": "Path of the node to move."},
+						"new_parent": {"type": "string", "description": "Path of the new parent node."},
+					},
+					"required": ["node", "new_parent"],
 					"additionalProperties": false,
 				},
 			},
@@ -290,6 +338,23 @@ static func default_tools() -> Array:
 						"script_path": {"type": "string", "description": "Resource path of the script, e.g. res://player.gd."},
 					},
 					"required": ["node", "script_path"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "set_anchors_preset",
+				"description": "Set a Control's anchor preset in one step, including editor-style grow directions (preferred over setting anchors/offsets/grow individually).",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"node": {"type": "string", "description": "Path of the target Control."},
+						"preset": {"type": "string", "enum": ["center", "top_left", "top_right", "bottom_left", "bottom_right", "center_left", "center_top", "center_right", "center_bottom", "left_wide", "top_wide", "bottom_wide", "right_wide", "vcenter_wide", "hcenter_wide", "full_rect"], "description": "Layout preset name, e.g. center, top_left, full_rect."},
+						"keep_offsets": {"type": "boolean", "description": "Default false: editor Layout-menu behavior (control moves/resizes into the preset, size kept unless the preset stretches). True: change anchors only, leave offsets untouched."},
+					},
+					"required": ["node", "preset"],
 					"additionalProperties": false,
 				},
 			},
@@ -464,6 +529,7 @@ func _send_stream(messages: Array, key: String) -> void:
 	_stream_leftover = ""
 	_stream_content = ""
 	_stream_tool_calls = {}
+	_stream_finish_reason = ""
 	_stream_tool_announced = false
 	_stream_error_bytes = PackedByteArray()
 	_stream_deadline = Time.get_ticks_msec() + int(stream_timeout * 1000.0)
@@ -596,6 +662,9 @@ func _handle_sse_line(line: String) -> void:
 	var first = choices[0]
 	if not first is Dictionary:
 		return
+	var choice_finish := str(first.get("finish_reason", ""))
+	if not choice_finish.is_empty():
+		_stream_finish_reason = choice_finish
 	var delta = first.get("delta", {})
 	if not delta is Dictionary:
 		return
@@ -631,6 +700,9 @@ func _finish_stream_success() -> void:
 	var tool_slots: Dictionary = _stream_tool_calls
 	_cleanup_stream()
 	if not tool_slots.is_empty():
+		if _stream_finish_reason == "length":
+			request_failed.emit("Response was cut off at the token limit (finish_reason=length); retry with fewer ops in one prompt or raise Max completion tokens.")
+			return
 		var raw_calls: Array = []
 		var indexes := tool_slots.keys()
 		indexes.sort()
@@ -781,7 +853,13 @@ static func validate_tool_call(tools_defs: Array, call_name: String, args: Varia
 				return "unknown parameter '%s'" % str(pname)
 			continue
 		var spec = properties[pname]
-		if not spec is Dictionary or not spec.has("type"):
+		if not spec is Dictionary:
+			continue
+		if spec.get("enum", null) is Array:
+			var allowed: Array = spec["enum"]
+			if not allowed.has(args[pname]):
+				return "parameter '%s' must be one of: %s" % [str(pname), str(allowed)]
+		if not spec.has("type"):
 			continue
 		var problem := _check_json_type(args[pname], str(spec["type"]))
 		if not problem.is_empty():
@@ -919,17 +997,21 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 			if not args_raw.strip_edges().is_empty():
 				var parsed_args = JSON.parse_string(args_raw)
 				if parsed_args == null or not parsed_args is Dictionary:
-					request_failed.emit("Invalid action '%s': arguments are not a JSON object." % fname)
+					request_failed.emit("Invalid native action '%s': arguments are not a JSON object." % fname)
 					return
 				args = parsed_args
 		elif args_raw is Dictionary:
 			args = args_raw
 		else:
-			request_failed.emit("Invalid action '%s': arguments must be an object." % fname)
+			request_failed.emit("Invalid native action '%s': arguments must be an object." % fname)
 			return
 		var problem := validate_tool_call(tools, fname, args)
 		if not problem.is_empty():
-			request_failed.emit("Invalid action '%s': %s" % [fname, problem])
+			var got := ", ".join(args.keys())
+			if got.is_empty():
+				got = "(none)"
+			print("[GdAI] rejected native tool call: ", JSON.stringify(raw))
+			request_failed.emit("Invalid native action '%s' (call %d of %d): %s (got: %s)" % [fname, index + 1, raw_calls.size(), problem, got])
 			return
 		var call_id := str(raw.get("id", ""))
 		if call_id.is_empty():
@@ -982,7 +1064,11 @@ func _handle_fallback_json(text: String) -> void:
 		var args = action.get("arguments", {})
 		var problem := validate_tool_call(tools, fname, args)
 		if not problem.is_empty():
-			request_failed.emit("Invalid action '%s': %s" % [fname, problem])
+			var got := ", ".join(args.keys())
+			if got.is_empty():
+				got = "(none)"
+			print("[GdAI] rejected JSON action: ", JSON.stringify(action))
+			request_failed.emit("Invalid JSON action '%s' (call %d of %d): %s (got: %s)" % [fname, index + 1, actions.size(), problem, got])
 			return
 		calls.append({
 			"id": "call_json_%d_%d" % [stamp, index],
@@ -1067,6 +1153,9 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 	var raw_calls = message.get("tool_calls", [])
 	var text := _content_to_text(message.get("content", ""))
 	if raw_calls is Array and not raw_calls.is_empty():
+		if str(first.get("finish_reason", "")) == "length":
+			request_failed.emit("Response was cut off at the token limit (finish_reason=length); retry with fewer ops in one prompt or raise Max completion tokens.")
+			return
 		_handle_native_tool_calls(raw_calls, text)
 		return
 	if _json_fallback_active:
