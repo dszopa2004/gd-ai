@@ -11,7 +11,16 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_7cpfj")
 
-[node name="CenterContainer" type="CenterContainer" parent="." unique_id=52603449]
+[node name="Background" type="ColorRect" parent="." unique_id=2019112350]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.19793725, 0.19793722, 0.19793722, 1)
+
+[node name="MenuContainer" type="CenterContainer" parent="." unique_id=1201342379]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -19,17 +28,20 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 
-[node name="MainMenu" type="VBoxContainer" parent="CenterContainer" unique_id=1971267158]
+[node name="VBox" type="VBoxContainer" parent="MenuContainer" unique_id=1534162248]
 layout_mode = 2
 
-[node name="TitleLabel" type="Label" parent="CenterContainer/MainMenu" unique_id=1444116986]
+[node name="TitleLabel" type="Label" parent="MenuContainer/VBox" unique_id=1355065252]
 layout_mode = 2
+size_flags_horizontal = 4
 text = "Main Menu"
 
-[node name="StartButton" type="Button" parent="CenterContainer/MainMenu" unique_id=1019536607]
+[node name="StartButton" type="Button" parent="MenuContainer/VBox" unique_id=999499687]
 layout_mode = 2
+size_flags_horizontal = 4
 text = "Start Game"
 
-[node name="OptionsButton" type="Button" parent="CenterContainer/MainMenu" unique_id=1021595710]
+[node name="OptionsButton" type="Button" parent="MenuContainer/VBox" unique_id=1419635778]
 layout_mode = 2
+size_flags_horizontal = 4
 text = "Options"

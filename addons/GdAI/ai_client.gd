@@ -1144,19 +1144,25 @@ func _maybe_start_json_fallback(code: int, parsed) -> bool:
 	return true
 
 
-# Handle a native tool call
+# Handle a native tool call. Per-call tolerant: invalid calls are skipped
+# (logged + noted) while valid siblings still execute; only an all-invalid
+# batch fails the turn.
 func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 	var calls: Array = []
+	var skipped: Array[String] = []
 	var stamp := Time.get_ticks_msec()
 	var index := 0
+	var pos := 0
 	for raw in raw_calls:
+		pos += 1
+		var tag := "call %d of %d" % [pos, raw_calls.size()]
 		if not raw is Dictionary:
-			request_failed.emit("Invalid tool call: entry %d is not an object." % index)
-			return
+			skipped.append("%s is not an object" % tag)
+			continue
 		var fn = raw.get("function", {})
 		if not fn is Dictionary:
-			request_failed.emit("Invalid tool call: entry %d has no function object." % index)
-			return
+			skipped.append("%s has no function object" % tag)
+			continue
 		var fname := str(fn.get("name", ""))
 		var args_raw = fn.get("arguments", "")
 		var args := {}
@@ -1164,33 +1170,41 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 			if not args_raw.strip_edges().is_empty():
 				var parsed_args = JSON.parse_string(args_raw)
 				if parsed_args == null or not parsed_args is Dictionary:
-					request_failed.emit("Invalid native action '%s': arguments are not a JSON object." % fname)
-					return
+					print("[GdAI] rejected native tool call: ", JSON.stringify(raw))
+					skipped.append("%s '%s': arguments are not a JSON object" % [tag, fname])
+					continue
 				args = parsed_args
 		elif args_raw is Dictionary:
 			args = args_raw
 		else:
-			request_failed.emit("Invalid native action '%s': arguments must be an object." % fname)
-			return
+			print("[GdAI] rejected native tool call: ", JSON.stringify(raw))
+			skipped.append("%s '%s': arguments must be an object" % [tag, fname])
+			continue
 		var problem := validate_tool_call(tools, fname, args)
 		if not problem.is_empty():
 			var got := ", ".join(args.keys())
 			if got.is_empty():
 				got = "(none)"
 			print("[GdAI] rejected native tool call: ", JSON.stringify(raw))
-			request_failed.emit("Invalid native action '%s' (call %d of %d): %s (got: %s)" % [fname, index + 1, raw_calls.size(), problem, got])
-			return
+			skipped.append("%s '%s': %s (got: %s)" % [tag, fname, problem, got])
+			continue
 		var call_id := str(raw.get("id", ""))
 		if call_id.is_empty():
 			call_id = "call_native_%d_%d" % [stamp, index]
 		calls.append({"id": call_id, "name": fname, "arguments": args})
 		index += 1
 	if calls.is_empty():
-		if preamble.is_empty():
+		if not skipped.is_empty():
+			request_failed.emit("Invalid native action(s): " + "; ".join(skipped))
+		elif preamble.strip_edges().is_empty():
 			request_failed.emit("Response had empty content.")
 		else:
 			response_received.emit(preamble)
 		return
+	if not skipped.is_empty():
+		if not preamble.strip_edges().is_empty():
+			preamble += "\n"
+		preamble += "(Skipped invalid calls: " + "; ".join(skipped) + ".)"
 	tool_calls_received.emit(calls, preamble)
 
 
@@ -1272,28 +1286,40 @@ func _handle_fallback_json(text: String) -> void:
 			response_received.emit(preamble)
 		return
 	var calls: Array = []
+	var skipped: Array[String] = []
 	var stamp := Time.get_ticks_msec()
 	var index := 0
+	var pos := 0
 	for action in actions:
+		pos += 1
+		var tag := "call %d of %d" % [pos, actions.size()]
 		if not action is Dictionary:
-			request_failed.emit("Invalid action JSON: actions[%d] must be an object." % index)
-			return
+			skipped.append("%s must be an object" % tag)
+			continue
 		var fname := str(action.get("name", ""))
 		var args = action.get("arguments", {})
 		var problem := validate_tool_call(tools, fname, args)
 		if not problem.is_empty():
-			var got := ", ".join(args.keys())
-			if got.is_empty():
+			var got := ", ".join(args.keys()) if args is Dictionary else "(not an object)"
+			if args is Dictionary and got.is_empty():
 				got = "(none)"
 			print("[GdAI] rejected JSON action: ", JSON.stringify(action))
-			request_failed.emit("Invalid JSON action '%s' (call %d of %d): %s (got: %s)" % [fname, index + 1, actions.size(), problem, got])
-			return
+			skipped.append("%s '%s': %s (got: %s)" % [tag, fname, problem, got])
+			continue
 		calls.append({
 			"id": "call_json_%d_%d" % [stamp, index],
 			"name": fname,
 			"arguments": args,
 		})
 		index += 1
+	if calls.is_empty():
+		# actions was non-empty here, so every call was skipped.
+		request_failed.emit("Invalid JSON action(s): " + "; ".join(skipped))
+		return
+	if not skipped.is_empty():
+		if not preamble.strip_edges().is_empty():
+			preamble += "\n"
+		preamble += "(Skipped invalid calls: " + "; ".join(skipped) + ".)"
 	tool_calls_received.emit(calls, preamble)
 
 
