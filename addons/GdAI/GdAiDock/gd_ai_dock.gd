@@ -859,6 +859,24 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 	return final
 
 
+# Live editor selection snapshot for undo-restore. Tree-transition ops manage
+# selection inside their UndoRedo action because the editor resolves selection
+# to scene paths on refresh: a selected node that leaves the tree errors with
+# "no path can be resolved". (Undo methods execute in registration order.)
+# Ordering rule: sel.clear first, structural ops in the middle, selection
+# restore last — selection never references a mid-flight node. remove_child
+# also nulls owner recursively (probe-verified), so every add_child pairs
+# with set_owner (saved owner, else the scene root, healing broken nodes.)
+# Exception: create-undo reseats selection BEFORE removal, since the node
+# stays orphaned — every follower must release it before it leaves the tree.
+static func _selection_snapshot() -> Array:
+	var out: Array = []
+	for sel_node in EditorInterface.get_selection().get_selected_nodes():
+		if is_instance_valid(sel_node):
+			out.append(sel_node)
+	return out
+
+
 # Per-action edit gate: locked nodes and nodes inside an uneditable instance
 # are skipped instead of modified. Returns "" when ok. Mirrors the Scene
 # dock: editability comes from each enclosing instance's Editable Children
@@ -1085,9 +1103,8 @@ func _op_create_node(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "could not instantiate '%s'" % node_type}
 	node.name = final_name
 	var is_control := node is Control
-	var prev_layout := 0
-	if is_control:
-		prev_layout = int(node.get("layout_mode"))
+	var sel := EditorInterface.get_selection()
+	var sel_before := _selection_snapshot()
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Create %s" % node_type)
 	undo_redo.add_do_method(parent, "add_child", node, true)
@@ -1095,11 +1112,19 @@ func _op_create_node(args: Dictionary) -> Dictionary:
 	if is_control:
 		# Controls start in Anchors layout mode, matching the editor.
 		undo_redo.add_do_property(node, "layout_mode", LAYOUT_MODE_ANCHORS)
+	undo_redo.add_do_method(sel, "clear")
+	undo_redo.add_do_method(sel, "add_node", node)
 	undo_redo.add_do_reference(node)
+	# Reseat selection onto live nodes BEFORE removal so no editor view that
+	# follows selection (inspector) still references the node on tree-exit.
+	undo_redo.add_undo_method(sel, "clear")
+	for sel_node in sel_before:
+		undo_redo.add_undo_method(sel, "add_node", sel_node)
+		undo_redo.add_undo_reference(sel_node)
 	undo_redo.add_undo_method(parent, "remove_child", node)
-	if is_control:
-		undo_redo.add_undo_property(node, "layout_mode", prev_layout)
 	undo_redo.commit_action()
+	if node.get_parent() != parent or not node.is_inside_tree():
+		return {"ok": false, "message": "create failed to apply under '%s'" % _scene_rel_path(root, parent)}
 	return {"ok": true, "message": "created %s '%s' under '%s'" % [node_type, final_name, _scene_rel_path(root, parent)]}
 
 
@@ -1116,14 +1141,34 @@ func _op_delete_node(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "node has no parent"}
 	var label := "%s '%s'" % [node.get_class(), node.name]
 	var old_owner: Node = node.owner
-	EditorInterface.get_selection().remove_node(node)
+	var heal_owner: Node = old_owner if old_owner != null else root
+	var sub_owners: Array = []
+	for d: Node in node.find_children("*", "", true, false):
+		var downer: Node = d.owner
+		sub_owners.append([d, downer if downer != null else root])
+	var sel := EditorInterface.get_selection()
+	var sel_before := _selection_snapshot()
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Delete Node")
+	# History anchor: the manager routes the action to the history of its
+	# FIRST method's target, so lead with a scene object (leading with the
+	# global selection misroutes scene methods with "history mismatch").
+	undo_redo.add_do_method(node, "set_owner", heal_owner)
+	undo_redo.add_do_method(sel, "remove_node", node)
 	undo_redo.add_do_method(parent, "remove_child", node)
 	undo_redo.add_do_reference(node)
+	undo_redo.add_undo_method(sel, "clear")
 	undo_redo.add_undo_method(parent, "add_child", node)
-	undo_redo.add_undo_method(node, "set_owner", old_owner)
+	undo_redo.add_undo_method(node, "set_owner", heal_owner)
+	for pair in sub_owners:
+		undo_redo.add_undo_method(pair[0], "set_owner", pair[1])
+		undo_redo.add_undo_reference(pair[0])
+	for sel_node in sel_before:
+		undo_redo.add_undo_method(sel, "add_node", sel_node)
+		undo_redo.add_undo_reference(sel_node)
 	undo_redo.commit_action()
+	if node.is_inside_tree() or node.get_parent() != null:
+		return {"ok": false, "message": "delete failed to apply on '%s'" % node.name}
 	return {"ok": true, "message": "deleted %s" % label}
 
 
@@ -1168,14 +1213,41 @@ func _op_reparent_node(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "node has no parent"}
 	if old_parent == new_parent:
 		return {"ok": true, "message": "already under '%s'" % _scene_rel_path(root, new_parent)}
+	var old_owner: Node = node.owner
+	var heal_owner: Node = old_owner if old_owner != null else root
+	var sub_owners: Array = []
+	for d: Node in node.find_children("*", "", true, false):
+		var downer: Node = d.owner
+		sub_owners.append([d, downer if downer != null else root])
+	var sel := EditorInterface.get_selection()
+	var sel_before := _selection_snapshot()
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Reparent Node")
+	# History anchor (see Delete Node): first method must target a scene
+	# object. Asserts owner pre-move; the post-add set_owner still does the
+	# real restore since remove_child nulls owner.
+	undo_redo.add_do_method(node, "set_owner", heal_owner)
+	undo_redo.add_do_method(sel, "clear")
 	undo_redo.add_do_method(old_parent, "remove_child", node)
 	undo_redo.add_do_method(new_parent, "add_child", node, true)
+	undo_redo.add_do_method(node, "set_owner", heal_owner)
+	for pair in sub_owners:
+		undo_redo.add_do_method(pair[0], "set_owner", pair[1])
+		undo_redo.add_do_reference(pair[0])
+	undo_redo.add_do_method(sel, "add_node", node)
 	undo_redo.add_do_reference(node)
+	undo_redo.add_undo_method(sel, "clear")
 	undo_redo.add_undo_method(new_parent, "remove_child", node)
 	undo_redo.add_undo_method(old_parent, "add_child", node, true)
+	undo_redo.add_undo_method(node, "set_owner", heal_owner)
+	for pair in sub_owners:
+		undo_redo.add_undo_method(pair[0], "set_owner", pair[1])
+	for sel_node in sel_before:
+		undo_redo.add_undo_method(sel, "add_node", sel_node)
+		undo_redo.add_undo_reference(sel_node)
 	undo_redo.commit_action()
+	if node.get_parent() != new_parent or not node.is_inside_tree() or node.owner == null:
+		return {"ok": false, "message": "reparent failed to apply under '%s'" % _scene_rel_path(root, new_parent)}
 	return {"ok": true, "message": "moved '%s' under '%s'" % [node.name, _scene_rel_path(root, new_parent)]}
 
 
