@@ -1,7 +1,11 @@
 extends Control
 
 func _ready() -> void:
-	$"Test Button".pressed.connect(_on_test_button_pressed)
+	$MenuContainer/VBox/StartButton.pressed.connect(_on_start_button_pressed)
+	$MenuContainer/VBox/OptionsButton.pressed.connect(_on_options_button_pressed)
 
-func _on_test_button_pressed() -> void:
-	print("Hello World!")
+func _on_start_button_pressed() -> void:
+	print("Starting game")
+
+func _on_options_button_pressed() -> void:
+	print("opening options")

@@ -73,7 +73,7 @@ func _ready() -> void:
 	# Set up ai client
 	client = AiClient.new()
 	add_child(client)
-	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. Emit at most one action per response; if asked for several things, do the first and briefly say what remains. After each action I'll return its result; reply with the next action until everything is done and verified in the results, then call finish with a short summary."
+	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. You may emit up to 3 actions per response, each fully specified; for longer tasks do the first steps and continue on the next turn. After each action I'll return its result; reply with the next actions until everything is done and verified in the results, then call finish with a short summary."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
 	client.streaming = true
