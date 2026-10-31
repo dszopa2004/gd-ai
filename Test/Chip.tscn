@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://bxbxuefdgrl8h"]
+
+[node name="Chip" type="Control" unique_id=1371377326]
+layout_mode = 3
+anchors_preset = 0
+offset_right = 35.0
+offset_bottom = 23.0
+
+[node name="ChipLabel" type="Label" parent="." unique_id=1983611781]
+layout_mode = 0
+offset_right = 40.0
+offset_bottom = 23.0
+text = "Chip"

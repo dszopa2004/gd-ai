@@ -413,8 +413,8 @@ func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bo
 	if not _loop_active:
 		return
 	_append_loop_transcript(preamble, calls, results)
-	if _turn_has_finish(calls) and not _turn_has_real_action(calls):
-		_end_loop() # pure finish: clean done state
+	if _turn_has_finish(calls) and not _turn_has_real_action(calls) and not capped:
+		_end_loop() # pure finish within budget: clean done state
 		return
 	if _turn_has_finish(calls) or capped:
 		_pause_loop() # ambiguous ending or cap: halted, but resumable via Continue
@@ -859,8 +859,11 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 	return final
 
 
-# Per-action edit gate: locked nodes and nodes not owned by the edited scene
-# (instanced or external) are skipped instead of modified. Returns "" when ok.
+# Per-action edit gate: locked nodes and nodes inside an uneditable instance
+# are skipped instead of modified. Returns "" when ok. Mirrors the Scene
+# dock: editability comes from each enclosing instance's Editable Children
+# flag, not from owner (instance children stay owned by their instance root
+# either way — verified headlessly against Node.is_editable_instance).
 func _check_targets_editable(fname: String, args: Dictionary) -> String:
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
@@ -884,9 +887,23 @@ func _check_targets_editable(fname: String, args: Dictionary) -> String:
 		var node: Node = resolved["node"]
 		if node.has_meta("_edit_lock_"):
 			return "skipped: '%s' is locked in the editor" % node.name
-		if node != root and node.owner != root:
-			return "skipped: '%s' is not owned by the edited scene (instanced or external node)" % node.name
+		var locked_ancestor := _enclosing_uneditable_instance(root, node)
+		if locked_ancestor != null:
+			return "skipped: '%s' is inside uneditable instance '%s' (enable Editable Children on it)" % [node.name, locked_ancestor.name]
 	return ""
+
+
+# Nearest ancestor that roots an instance (it carries a scene_file_path)
+# whose Editable Children flag is off; null when fully editable. The walk
+# stops below the edited root, and the target itself is never examined, so
+# instance roots (local, owned nodes) stay editable like in the dock.
+static func _enclosing_uneditable_instance(root: Node, node: Node) -> Node:
+	var at := node.get_parent()
+	while at != null and root.is_ancestor_of(at):
+		if not str(at.scene_file_path).strip_edges().is_empty() and not root.is_editable_instance(at):
+			return at
+		at = at.get_parent()
+	return null
 
 
 # Resolves a scene-relative (or absolute) path to a node in the edited scene.
