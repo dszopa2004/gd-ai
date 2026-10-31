@@ -120,6 +120,16 @@ func save_config() -> void:
 # Sends a message to ai with adjusted settings
 # Throw error if HTTP request could not be started
 func send(messages: Array) -> void:
+	_send_with_options(messages, true)
+
+
+# Follow-up turn of a multi-turn tool loop: same as send(), but a JSON-mode
+# fallback negotiated on an earlier turn is kept instead of retried natively.
+func send_followup(messages: Array) -> void:
+	_send_with_options(messages, false)
+
+
+func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 	if busy:
 		return
 	var key := _sanitize_key(api_key)
@@ -138,7 +148,8 @@ func send(messages: Array) -> void:
 	if _history_dropped > 0:
 		print("[GdAI] Trimmed %d oldest %s to fit the history budget." % [_history_dropped, "message" if _history_dropped == 1 else "messages"])
 	_retry_attempt = 0
-	_json_fallback_active = false
+	if reset_fallback:
+		_json_fallback_active = false
 	_request_generation += 1
 	_start_request()
 
@@ -355,6 +366,54 @@ static func default_tools() -> Array:
 						"keep_offsets": {"type": "boolean", "description": "Default false: editor Layout-menu behavior (control moves/resizes into the preset, size kept unless the preset stretches). True: change anchors only, leave offsets untouched."},
 					},
 					"required": ["node", "preset"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "create_script",
+				"description": "Create a new GDScript file with the given content. Parent folders are created as needed. Refuses to overwrite an existing file; attach it afterwards with attach_script.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"path": {"type": "string", "description": "Resource path, e.g. res://Test/test_menu.gd. Must stay inside res:// and end with .gd."},
+						"content": {"type": "string", "description": "Full GDScript source text."},
+					},
+					"required": ["path", "content"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "read_script",
+				"description": "Read an existing .gd file. The full content goes to the model; chat shows only the byte count.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"path": {"type": "string", "description": "Resource path, e.g. res://Test/test_menu.gd."},
+					},
+					"required": ["path"],
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "edit_script",
+				"description": "Edit an existing .gd file with exact find/replace. Find must occur exactly once; include surrounding lines to make it unique. Refuses ambiguous or missing matches.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"path": {"type": "string", "description": "Resource path of the file to edit."},
+						"find": {"type": "string", "description": "Exact text to replace (must occur once)."},
+						"replace": {"type": "string", "description": "Replacement text (may be empty to delete)."},
+					},
+					"required": ["path", "find", "replace"],
 					"additionalProperties": false,
 				},
 			},
@@ -937,10 +996,63 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 		kept.push_front(msg)
 		chars += text.length()
 		count += 1
-	# Keep payloads starting on a user turn (Phase 2: extend for tool pairs).
-	if not kept.is_empty() and kept[0] is Dictionary and str(kept[0].get("role", "")) == "assistant":
+	# Never start on a dangling turn (an intact assistant tool pair may lead).
+	while not kept.is_empty() and kept[0] is Dictionary and _is_dangling_lead(kept[0]):
 		kept.pop_front()
 	return {"messages": kept, "dropped": messages.size() - kept.size()}
+
+
+# A kept suffix may only start mid-conversation on a user turn or an intact
+# assistant tool pair. A leading tool result (its assistant turn was cut) or a
+# plain leading assistant reply would dangle, and the API rejects dangling
+# tool messages — so both are dropped.
+static func _is_dangling_lead(msg: Dictionary) -> bool:
+	var role := str(msg.get("role", ""))
+	if role == "tool":
+		return true
+	if role == "assistant":
+		var calls = msg.get("tool_calls", [])
+		return not (calls is Array and not calls.is_empty())
+	return false
+
+
+# Validates + normalizes a model-supplied script path. Sandboxes to res://
+# files ending in .gd: absolute paths, other schemes, and ".." are rejected.
+# Returns {"ok": bool, "path": normalized res:// path, "error": String}.
+static func validate_script_path(raw_path: String) -> Dictionary:
+	var clean := raw_path.strip_edges().replace("\\", "/")
+	if clean.is_empty():
+		return {"ok": false, "path": "", "error": "script path is empty"}
+	if clean.contains("://"):
+		if not clean.begins_with("res://"):
+			return {"ok": false, "path": "", "error": "script path must be inside res://"}
+	else:
+		if clean.begins_with("/") or clean.contains(":"):
+			return {"ok": false, "path": "", "error": "script path must be inside res://"}
+		clean = "res://" + clean
+	if clean.contains(".."):
+		return {"ok": false, "path": "", "error": "script path must not contain '..'"}
+	if not clean.to_lower().ends_with(".gd"):
+		return {"ok": false, "path": "", "error": "script path must end with .gd"}
+	if clean.get_file().length() <= 3:
+		return {"ok": false, "path": "", "error": "script path has no file name"}
+	return {"ok": true, "path": clean, "error": ""}
+
+
+# Pure find/replace core for script edits. Requires exactly one match so an
+# ambiguous find can never rewrite the wrong block.
+# Returns {"ok": bool, "content": new text, "error": String, "noop": bool}.
+static func apply_script_edit(content: String, find: String, replace: String) -> Dictionary:
+	if find.is_empty():
+		return {"ok": false, "content": content, "error": "find text is empty"}
+	if find == replace:
+		return {"ok": true, "content": content, "error": "", "noop": true}
+	var hits := content.count(find)
+	if hits == 0:
+		return {"ok": false, "content": content, "error": "find text not found in file"}
+	if hits > 1:
+		return {"ok": false, "content": content, "error": "find text matches %d blocks — include more surrounding lines" % hits}
+	return {"ok": true, "content": content.replace(find, replace), "error": ""}
 
 
 # Check if a tool might be unsupported
