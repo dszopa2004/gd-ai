@@ -44,7 +44,7 @@ var client: AiClient
 var pending_ai_message: MessageBox
 var _send_button_text := "Send"
 var _send_button_tooltip := ""
-var auto_execute := false # true = run validated calls immediately (testing); false = gate behind Approve/Reject
+var auto_execute := false # true = run every turn immediately (testing escape hatch); false = auto-run safe turns, gate destructive ones behind Approve/Reject
 var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base_text, message, row, buttons, history_ref, preamble, capped, generation
 const MAX_LOOP_TOOL_TURNS := 3 # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost)
 const MAX_READ_CHARS := 8000 # read_script truncation cap (chars); protects the context window from huge files
@@ -73,7 +73,7 @@ func _ready() -> void:
 	# Set up ai client
 	client = AiClient.new()
 	add_child(client)
-	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. Emit at most one action per response; if asked for several things, do the first and briefly say what remains. After each action I'll return its result; keep going until the request is done, then reply with a short summary and no more actions."
+	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. Emit at most one action per response; if asked for several things, do the first and briefly say what remains. After each action I'll return its result; reply with the next action until everything is done and verified in the results, then call finish with a short summary."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
 	client.streaming = true
@@ -206,6 +206,7 @@ func _on_send_button_pressed() -> void:
 	print("[GdAI] Sending: stream=%s tools=%d history=%d." % [client.streaming, client.tools.size(), history.size()])
 	# Refresh send visibility/disabled now that a request is about to start.
 	# client.send sets busy=true on success; update again after in case it failed fast.
+	client.tool_choice = "auto" # first turn: the model may answer or act
 	client.send(history)
 	_on_user_input_box_text_changed()
 
@@ -255,16 +256,18 @@ func _on_ai_response(text: String) -> void:
 	_on_user_input_box_text_changed()
 
 
-# Structured actions: auto-run when auto_execute is on, otherwise hold them on
-# an Approve/Reject card. Batch-aware: one decision covers all calls in the turn.
+# Structured actions: safe turns auto-run (the loop continues click-free);
+# turns containing a destructive action hold on an Approve/Reject card.
 func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var lines: Array[String] = []
 	if not preamble.strip_edges().is_empty():
 		lines.append(preamble.strip_edges())
-	lines.append("Planned actions:")
-	for call in calls:
-		if call is Dictionary:
-			lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
+	if not all_finish:
+		lines.append("Planned actions:")
+		for call in calls:
+			if call is Dictionary:
+				lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
 	if calls.is_empty():
 		_end_loop() # nothing to approve or run; the turn is over
 	var capped := false
@@ -272,13 +275,17 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		_loop_count += 1
 		capped = _loop_count > MAX_LOOP_TOOL_TURNS
 	var turn_results: Array = []
-	var needs_approval := not auto_execute and not calls.is_empty()
-	if auto_execute and not calls.is_empty():
-		lines.append("Results:")
+	var needs_approval := not auto_execute and not calls.is_empty() and _turn_needs_approval(calls)
+	if not needs_approval and not calls.is_empty():
 		turn_results = execute_tool_calls(calls)
-		for result in turn_results:
-			var mark := "✓" if bool(result.get("ok", false)) else "✗"
-			lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
+		if all_finish:
+			for result in turn_results:
+				lines.append("✓ " + str(result.get("message", "")))
+		else:
+			lines.append("Results:")
+			for result in turn_results:
+				var mark := "✓" if bool(result.get("ok", false)) else "✗"
+				lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
 		if capped:
 			lines.append("(Loop limit reached — say 'continue' to go on.)")
 	if needs_approval:
@@ -286,6 +293,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		if scene_root == null:
 			lines.append("(No scene is open — open a scene and ask again to apply.)")
 			needs_approval = false
+			_end_loop() # nothing can execute or continue without a scene
 		else:
 			if str(scene_root.scene_file_path).strip_edges().is_empty():
 				lines.append("Note: this scene has never been saved — approving modifies the open scene only; nothing is auto-saved.")
@@ -303,8 +311,24 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		_show_approval_row(calls, rendered, history_ref, preamble, capped)
 	pending_ai_message = null
 	_on_user_input_box_text_changed()
-	if auto_execute and not calls.is_empty():
+	if not needs_approval and not calls.is_empty():
 		_after_tool_turn(preamble, calls, turn_results, capped)
+
+
+# Approval policy: a turn pauses for approval only if it contains a
+# destructive action; everything else runs (and loops) without clicks.
+static func _turn_needs_approval(calls: Array) -> bool:
+	for call in calls:
+		if call is Dictionary and _is_destructive_action(str(call.get("name", ""))):
+			return true
+	return false
+
+
+# Destructive = deleting a node. NOTE: file writes (create/edit_script) are
+# NOT undoable, unlike node deletion — add their names here to gate them
+# behind approval again.
+static func _is_destructive_action(fname: String) -> bool:
+	return fname == "delete_node"
 
 
 # Show Approve/Reject buttons under the planned-actions bubble. Only one card
@@ -378,6 +402,10 @@ func _on_reject_pressed() -> void:
 func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bool) -> void:
 	if not _loop_active:
 		return
+	for call in calls:
+		if call is Dictionary and str(call.get("name", "")) == "finish":
+			_end_loop() # the model declared the task done; no follow-up
+			return
 	_append_loop_transcript(preamble, calls, results)
 	if capped:
 		_end_loop()
@@ -427,6 +455,7 @@ func _continue_loop() -> void:
 	if not history is Array:
 		_end_loop()
 		return
+	# (send_followup selects required vs stepped-down auto.)
 	client.context_prompt = _build_editor_context()
 	pending_ai_message = add_message("Thinking…", false)
 	var followup := history.duplicate()
@@ -439,6 +468,8 @@ func _end_loop() -> void:
 	_loop_active = false
 	_loop_transcript = []
 	_loop_count = 0
+	if client != null:
+		client.tool_choice = "auto"
 
 
 func _supersede_pending_approval() -> void:
@@ -747,6 +778,8 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 			outcome = _op_read_script(args)
 		"edit_script":
 			outcome = _op_edit_script(args)
+		"finish":
+			outcome = _op_finish(args)
 	var final := {"name": fname, "ok": bool(outcome.get("ok", false)), "message": str(outcome.get("message", ""))}
 	if outcome is Dictionary and outcome.has("detail"):
 		final["detail"] = outcome["detail"] # full payload for the model's tool transcript; chat shows message only
@@ -1218,6 +1251,13 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
 		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
 	return {"ok": true, "message": "edited '%s' (1 block replaced; verified on disk, not undoable)" % res_path}
+
+
+func _op_finish(args: Dictionary) -> Dictionary:
+	var summary := str(args.get("summary", "")).strip_edges()
+	if summary.is_empty():
+		summary = "Done."
+	return {"ok": true, "message": summary}
 
 
 func _op_set_anchors_preset(args: Dictionary) -> Dictionary:

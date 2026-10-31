@@ -11,17 +11,25 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_7cpfj")
 
-[node name="Test Button" type="Button" parent="." unique_id=2028752381]
+[node name="CenterContainer" type="CenterContainer" parent="." unique_id=52603449]
 layout_mode = 1
-anchors_preset = 8
-anchor_left = 0.5
-anchor_top = 0.5
-anchor_right = 0.5
-anchor_bottom = 0.5
-offset_left = -65.5
-offset_top = -15.5
-offset_right = 65.5
-offset_bottom = 15.5
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-text = "Test this button"
+
+[node name="MainMenu" type="VBoxContainer" parent="CenterContainer" unique_id=1971267158]
+layout_mode = 2
+
+[node name="TitleLabel" type="Label" parent="CenterContainer/MainMenu" unique_id=1444116986]
+layout_mode = 2
+text = "Main Menu"
+
+[node name="StartButton" type="Button" parent="CenterContainer/MainMenu" unique_id=1019536607]
+layout_mode = 2
+text = "Start Game"
+
+[node name="OptionsButton" type="Button" parent="CenterContainer/MainMenu" unique_id=1021595710]
+layout_mode = 2
+text = "Options"

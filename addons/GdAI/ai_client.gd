@@ -51,6 +51,7 @@ var _retry_attempt := 0
 var _request_generation := 0
 var _expecting_response := false
 var _json_fallback_active := false
+var _choice_stepped_down := false # session-sticky: endpoint rejected tool_choice=required once, stay on auto
 var _stream_tool_calls: Dictionary = {}
 var _stream_finish_reason := ""
 var _stream_tool_announced := false
@@ -125,7 +126,10 @@ func send(messages: Array) -> void:
 
 # Follow-up turn of a multi-turn tool loop: same as send(), but a JSON-mode
 # fallback negotiated on an earlier turn is kept instead of retried natively.
+# Selects required unless the endpoint already rejected it (sticky step-down).
 func send_followup(messages: Array) -> void:
+	if not _choice_stepped_down:
+		tool_choice = "required"
 	_send_with_options(messages, false)
 
 
@@ -418,6 +422,21 @@ static func default_tools() -> Array:
 				},
 			},
 		},
+		{
+			"type": "function",
+			"function": {
+				"name": "finish",
+				"description": "End the current task with a short summary. Call only when everything is done and verified in the results.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"summary": {"type": "string", "description": "Short summary of what was accomplished."},
+					},
+					"required": ["summary"],
+					"additionalProperties": false,
+				},
+			},
+		},
 	]
 
 
@@ -680,10 +699,11 @@ func _read_stream_chunks() -> void:
 		_finish_stream_error_from_body()
 
 
-# Confirm if stream body is complete
+# Confirm if stream body is complete. Error bytes are the only body tracked
+# while streaming (HTTPClient has no get_downloaded_bytes; that's HTTPRequest).
 func _stream_body_complete() -> bool:
 	var total := _stream_client.get_response_body_length()
-	return total >= 0 and _stream_client.get_downloaded_bytes() >= total
+	return total >= 0 and _stream_error_bytes.size() >= total
 
 
 # Append stream text
@@ -802,6 +822,8 @@ func _finish_stream_error_from_body() -> void:
 	if _stream_client != null:
 		headers = _stream_client.get_response_headers()
 	_cleanup_stream()
+	if _maybe_step_down_tool_choice(code, parsed):
+		return
 	if _maybe_start_json_fallback(code, parsed):
 		return
 	if _is_retryable_code(code) and _retry_attempt < max_retries:
@@ -1074,6 +1096,39 @@ static func _looks_like_tools_unsupported(parsed) -> bool:
 		or hay.contains("unrecognized") or hay.contains("parameter") or hay.contains("field")
 
 
+# One-line "code message" detail from an API error body for log lines.
+static func _error_detail(parsed) -> String:
+	var err = null
+	if parsed is Dictionary:
+		err = parsed.get("error", null)
+	var code_str := ""
+	var message := ""
+	if err is Dictionary:
+		var code_raw = err.get("code", "")
+		var msg_raw = err.get("message", "")
+		code_str = "" if code_raw == null else str(code_raw)
+		message = "" if msg_raw == null else str(msg_raw)
+	elif err is String:
+		message = err
+	var detail := (code_str + " " + message).strip_edges()
+	return detail if not detail.is_empty() else "unspecified error"
+
+
+# If the endpoint rejected tool_choice=required specifically, step down to
+# auto and retry natively once (sticky for the session). Returns true when
+# the retry was started. Anything else falls through to JSON fallback.
+func _maybe_step_down_tool_choice(code: int, parsed) -> bool:
+	if _choice_stepped_down or tool_choice != "required" or code != 400:
+		return false
+	if not _error_detail(parsed).to_lower().contains("tool_choice"):
+		return false
+	_choice_stepped_down = true
+	tool_choice = "auto"
+	print("[GdAI] Endpoint rejected tool_choice=required (%s); retrying natively with auto." % _error_detail(parsed))
+	_start_request()
+	return true
+
+
 # If the endpoint rejected the tools parameter, re-issue once as JSON-mode
 # single-shot. Returns true when the fallback request was started.
 func _maybe_start_json_fallback(code: int, parsed) -> bool:
@@ -1084,7 +1139,7 @@ func _maybe_start_json_fallback(code: int, parsed) -> bool:
 	if not _looks_like_tools_unsupported(parsed):
 		return false
 	_json_fallback_active = true
-	print("[GdAI] Endpoint rejected tools; retrying in JSON mode.")
+	print("[GdAI] Endpoint rejected tools (%s); retrying in JSON mode." % _error_detail(parsed))
 	_start_request()
 	return true
 
@@ -1139,20 +1194,71 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 	tool_calls_received.emit(calls, preamble)
 
 
+# Best-effort extraction of the fallback JSON object from model text that may
+# wrap it in prose or code fences. Returns the parsed Dictionary, or {}.
+static func _extract_fallback_json(text: String) -> Dictionary:
+	var clean := text.strip_edges()
+	if clean.begins_with("```"):
+		var nl := clean.find("\n")
+		var end := clean.rfind("```")
+		if nl != -1 and end > nl:
+			clean = clean.substr(nl + 1, end - nl - 1).strip_edges()
+	if clean.begins_with("{"):
+		var whole = JSON.parse_string(clean)
+		if whole is Dictionary and whole.has("actions"):
+			return whole
+	var tries := 0
+	var from := 0
+	while tries < 10:
+		var open := clean.find("{", from)
+		if open == -1:
+			break
+		tries += 1
+		from = open + 1
+		var candidate := _balanced_braces(clean, open)
+		if candidate.is_empty():
+			continue
+		var parsed = JSON.parse_string(candidate)
+		if parsed is Dictionary and parsed.has("actions"):
+			return parsed
+	return {}
+
+
+# String-aware balanced-brace scan: the substring from the opening brace at
+# open_at through its match, or "" when unbalanced.
+static func _balanced_braces(text: String, open_at: int) -> String:
+	var depth := 0
+	var in_string := false
+	var escaped := false
+	for i in range(open_at, text.length()):
+		var ch := text.substr(i, 1)
+		if in_string:
+			if escaped:
+				escaped = false
+			elif ch == "\\":
+				escaped = true
+			elif ch == "\"":
+				in_string = false
+		else:
+			if ch == "\"":
+				in_string = true
+			elif ch == "{":
+				depth += 1
+			elif ch == "}":
+				depth -= 1
+				if depth == 0:
+					return text.substr(open_at, i - open_at + 1)
+	return ""
+
+
 # Handle fallback
 func _handle_fallback_json(text: String) -> void:
 	if text.is_empty():
 		request_failed.emit("Response had empty content.")
 		return
-	var parsed = JSON.parse_string(text)
-	if parsed == null:
+	var parsed := _extract_fallback_json(text)
+	if parsed.is_empty():
 		response_received.emit(text)
-		return
-	if not parsed is Dictionary:
-		request_failed.emit("Invalid action JSON: top level must be an object.")
-		return
-	if not parsed.has("actions"):
-		request_failed.emit("Invalid action JSON: missing \"actions\".")
 		return
 	var actions = parsed["actions"]
 	if not actions is Array:
@@ -1231,6 +1337,8 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 
 	# If there is an error code, check what the error code was
 	if code != 200:
+		if _maybe_step_down_tool_choice(code, parsed):
+			return
 		if _maybe_start_json_fallback(code, parsed):
 			return
 		if _is_retryable_code(code) and _retry_attempt < max_retries:
