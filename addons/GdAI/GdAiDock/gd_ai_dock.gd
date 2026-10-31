@@ -44,7 +44,14 @@ var client: AiClient
 var pending_ai_message: MessageBox
 var _send_button_text := "Send"
 var _send_button_tooltip := ""
-var auto_execute := true # Phase 2: run validated calls immediately (until Approval UI gates them)
+var auto_execute := false # true = run validated calls immediately (testing); false = gate behind Approve/Reject
+var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base_text, message, row, buttons, history_ref, preamble, capped, generation
+const MAX_LOOP_TOOL_TURNS := 3 # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost)
+const MAX_READ_CHARS := 8000 # read_script truncation cap (chars); protects the context window from huge files
+var _loop_active := false
+var _loop_transcript: Array = [] # request-scoped assistant tool pairs + tool results; never stored in chat history
+var _loop_count := 0 # tool turns received this user message
+var _loop_generation := 0 # user-message stamp; an approval from an older generation never continues the loop
 
 func _ready() -> void:
 	# Tab button signals
@@ -66,7 +73,7 @@ func _ready() -> void:
 	# Set up ai client
 	client = AiClient.new()
 	add_child(client)
-	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. Emit at most one action per response; if asked for several things, do the first and briefly say what remains."
+	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. Emit at most one action per response; if asked for several things, do the first and briefly say what remains. After each action I'll return its result; keep going until the request is done, then reply with a short summary and no more actions."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
 	client.streaming = true
@@ -191,6 +198,10 @@ func _on_send_button_pressed() -> void:
 
 	# Fresh editor snapshot for this request (never stored in history).
 	client.context_prompt = _build_editor_context()
+	_loop_active = true
+	_loop_transcript = []
+	_loop_count = 0
+	_loop_generation += 1
 	pending_ai_message = add_message("Thinking...", false)
 	print("[GdAI] Sending: stream=%s tools=%d history=%d." % [client.streaming, client.tools.size(), history.size()])
 	# Refresh send visibility/disabled now that a request is about to start.
@@ -213,6 +224,7 @@ func _on_cancel_requested() -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Request cancelled.")
 	pending_ai_message = null
+	_end_loop()
 
 	# Keep the user's unanswered turn in history so it stays for context or retry.
 	_refresh_send_button()
@@ -239,10 +251,12 @@ func _on_ai_response(text: String) -> void:
 	pending_ai_message = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
+	_end_loop() # plain-text reply: the model is done acting
 	_on_user_input_box_text_changed()
 
 
-# Render structured actions as text until Phase 2 executes them.
+# Structured actions: auto-run when auto_execute is on, otherwise hold them on
+# an Approve/Reject card. Batch-aware: one decision covers all calls in the turn.
 func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var lines: Array[String] = []
 	if not preamble.strip_edges().is_empty():
@@ -251,18 +265,213 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	for call in calls:
 		if call is Dictionary:
 			lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+	if calls.is_empty():
+		_end_loop() # nothing to approve or run; the turn is over
+	var capped := false
+	if not calls.is_empty():
+		_loop_count += 1
+		capped = _loop_count > MAX_LOOP_TOOL_TURNS
+	var turn_results: Array = []
+	var needs_approval := not auto_execute and not calls.is_empty()
 	if auto_execute and not calls.is_empty():
 		lines.append("Results:")
-		for result in execute_tool_calls(calls):
+		turn_results = execute_tool_calls(calls)
+		for result in turn_results:
 			var mark := "✓" if bool(result.get("ok", false)) else "✗"
 			lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
+		if capped:
+			lines.append("(Loop limit reached — say 'continue' to go on.)")
+	if needs_approval:
+		var scene_root := EditorInterface.get_edited_scene_root()
+		if scene_root == null:
+			lines.append("(No scene is open — open a scene and ask again to apply.)")
+			needs_approval = false
+		else:
+			if str(scene_root.scene_file_path).strip_edges().is_empty():
+				lines.append("Note: this scene has never been saved — approving modifies the open scene only; nothing is auto-saved.")
+			lines.append("⏳ Awaiting approval.")
 	var rendered := "\n".join(lines)
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(rendered)
-	pending_ai_message = null
+	var history_ref = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", rendered)
+		var msgs: Array = current_chat["messages"]
+		if not msgs.is_empty() and msgs[msgs.size() - 1] is Dictionary:
+			history_ref = msgs[msgs.size() - 1]
+	if needs_approval and pending_ai_message != null and is_instance_valid(pending_ai_message):
+		_show_approval_row(calls, rendered, history_ref, preamble, capped)
+	pending_ai_message = null
 	_on_user_input_box_text_changed()
+	if auto_execute and not calls.is_empty():
+		_after_tool_turn(preamble, calls, turn_results, capped)
+
+
+# Show Approve/Reject buttons under the planned-actions bubble. Only one card
+# can be pending: a newer plan supersedes (rejects) the older one.
+func _show_approval_row(calls: Array, base_text: String, history_ref, preamble: String, capped: bool) -> void:
+	_supersede_pending_approval()
+	var approve_btn := Button.new()
+	approve_btn.text = "Approve"
+	approve_btn.tooltip_text = "Apply all %d action(s) to the edited scene" % calls.size()
+	approve_btn.pressed.connect(_on_approve_pressed)
+	var reject_btn := Button.new()
+	reject_btn.text = "Reject"
+	reject_btn.tooltip_text = "Discard without changing the scene"
+	reject_btn.pressed.connect(_on_reject_pressed)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(approve_btn)
+	row.add_child(reject_btn)
+	row.add_child(spacer)
+	message_list.add_child(row)
+	_pending_approval = {
+		"calls": calls, "base_text": base_text, "message": pending_ai_message,
+		"row": row, "approve": approve_btn, "reject": reject_btn, "history_ref": history_ref,
+		"preamble": preamble, "capped": capped, "generation": _loop_generation,
+	}
+
+
+func _on_approve_pressed() -> void:
+	if _pending_approval.is_empty():
+		return
+	var pending: Dictionary = _pending_approval
+	_pending_approval = {}
+	_lock_approval_buttons(pending, true)
+	var stale := int(pending.get("generation", -1)) != _loop_generation
+	var turn_calls: Array = pending.get("calls", [])
+	var lines: Array[String] = [str(pending.get("base_text", ""))]
+	lines.append("Results:")
+	var turn_results := execute_tool_calls(turn_calls)
+	for result in turn_results:
+		var mark := "✓" if bool(result.get("ok", false)) else "✗"
+		lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
+	if stale:
+		# A newer user message started since this card appeared: apply, but
+		# never feed stale results into the new turn's loop.
+		lines.append("(Superseded by a newer request — not fed back.)")
+	elif bool(pending.get("capped", false)):
+		lines.append("(Loop limit reached — say 'continue' to go on.)")
+	_update_pending_record(pending, "\n".join(lines))
+	_on_user_input_box_text_changed()
+	if not stale:
+		_after_tool_turn(str(pending.get("preamble", "")), turn_calls, turn_results, bool(pending.get("capped", false)))
+
+
+func _on_reject_pressed() -> void:
+	if _pending_approval.is_empty():
+		return
+	var pending: Dictionary = _pending_approval
+	_pending_approval = {}
+	_lock_approval_buttons(pending, false)
+	_update_pending_record(pending, str(pending.get("base_text", "")) + "\nRejected — no changes applied.")
+	_end_loop()
+	_on_user_input_box_text_changed()
+
+
+# Multi-turn tool loop: after a turn's calls execute, record the assistant
+# tool pair plus per-call results as real tool messages and re-send, so the
+# model observes outcomes and keeps going until it answers with plain text.
+func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bool) -> void:
+	if not _loop_active:
+		return
+	_append_loop_transcript(preamble, calls, results)
+	if capped:
+		_end_loop()
+		return
+	_continue_loop()
+
+
+func _append_loop_transcript(preamble: String, calls: Array, results: Array) -> void:
+	var tool_calls: Array = []
+	for call in calls:
+		if not call is Dictionary:
+			continue
+		tool_calls.append({
+			"id": str(call.get("id", "")),
+			"type": "function",
+			"function": {
+				"name": str(call.get("name", "")),
+				"arguments": JSON.stringify(call.get("arguments", {})),
+			},
+		})
+	if tool_calls.is_empty():
+		return
+	_loop_transcript.append({"role": "assistant", "content": preamble, "tool_calls": tool_calls})
+	var pair_count: int = mini(calls.size(), results.size())
+	for i in pair_count:
+		var call = calls[i]
+		var result = results[i]
+		if not call is Dictionary or not result is Dictionary:
+			continue
+		var payload := {"ok": bool(result.get("ok", false)), "message": str(result.get("message", ""))}
+		if result.has("detail"):
+			payload["detail"] = result["detail"]
+		_loop_transcript.append({
+			"role": "tool",
+			"tool_call_id": str(call.get("id", "")),
+			"content": JSON.stringify(payload),
+		})
+
+
+func _continue_loop() -> void:
+	if not _loop_active or client == null or client.busy:
+		return
+	if current_chat.is_empty() or not current_chat.has("messages"):
+		_end_loop()
+		return
+	var history: Array = current_chat["messages"]
+	if not history is Array:
+		_end_loop()
+		return
+	client.context_prompt = _build_editor_context()
+	pending_ai_message = add_message("Thinking…", false)
+	var followup := history.duplicate()
+	followup.append_array(_loop_transcript)
+	client.send_followup(followup)
+	_on_user_input_box_text_changed()
+
+
+func _end_loop() -> void:
+	_loop_active = false
+	_loop_transcript = []
+	_loop_count = 0
+
+
+func _supersede_pending_approval() -> void:
+	if _pending_approval.is_empty():
+		return
+	var pending: Dictionary = _pending_approval
+	_pending_approval = {}
+	_lock_approval_buttons(pending, false)
+	_update_pending_record(pending, str(pending.get("base_text", "")) + "\nSuperseded by a newer request — treated as rejected.")
+
+
+func _lock_approval_buttons(pending: Dictionary, approved: bool) -> void:
+	var approve_btn = pending.get("approve")
+	if approve_btn != null and is_instance_valid(approve_btn):
+		approve_btn.disabled = true
+		if approved:
+			approve_btn.text = "Approved ✓"
+	var reject_btn = pending.get("reject")
+	if reject_btn != null and is_instance_valid(reject_btn):
+		reject_btn.disabled = true
+		if not approved:
+			reject_btn.text = "Rejected"
+
+
+func _update_pending_record(pending: Dictionary, full_text: String) -> void:
+	var message = pending.get("message")
+	if message != null and is_instance_valid(message):
+		message.set_message_text(full_text)
+	var history_ref = pending.get("history_ref")
+	if history_ref is Dictionary:
+		history_ref["content"] = full_text
+		if not current_chat.is_empty():
+			ChatStore.save_chat(current_chat)
 
 
 # Handle error on ai message
@@ -270,6 +479,7 @@ func _on_ai_error(message: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Error: " + message)
 	pending_ai_message = null
+	_end_loop()
 
 	# Keep the user's unanswered turn in history so it stays for context or retry.
 	_on_user_input_box_text_changed()
@@ -512,6 +722,9 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 	var problem := AiClient.validate_tool_call(client.tools, fname, args)
 	if not problem.is_empty():
 		return {"name": fname, "ok": false, "message": "invalid: " + problem}
+	var editable_problem := _check_targets_editable(fname, args)
+	if not editable_problem.is_empty():
+		return {"name": fname, "ok": false, "message": editable_problem}
 	var outcome := {"ok": false, "message": "unknown action '%s'" % fname}
 	match fname:
 		"create_node":
@@ -528,7 +741,46 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 			outcome = _op_attach_script(args)
 		"set_anchors_preset":
 			outcome = _op_set_anchors_preset(args)
-	return {"name": fname, "ok": bool(outcome.get("ok", false)), "message": str(outcome.get("message", ""))}
+		"create_script":
+			outcome = _op_create_script(args)
+		"read_script":
+			outcome = _op_read_script(args)
+		"edit_script":
+			outcome = _op_edit_script(args)
+	var final := {"name": fname, "ok": bool(outcome.get("ok", false)), "message": str(outcome.get("message", ""))}
+	if outcome is Dictionary and outcome.has("detail"):
+		final["detail"] = outcome["detail"] # full payload for the model's tool transcript; chat shows message only
+	return final
+
+
+# Per-action edit gate: locked nodes and nodes not owned by the edited scene
+# (instanced or external) are skipped instead of modified. Returns "" when ok.
+func _check_targets_editable(fname: String, args: Dictionary) -> String:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return "" # each op reports "no scene is open" itself
+	var targets: Array[String] = []
+	match fname:
+		"create_node":
+			var parent_path := str(args.get("parent", "")).strip_edges()
+			targets.append(parent_path if not parent_path.is_empty() else ".")
+		"reparent_node":
+			targets.append(str(args.get("node", "")))
+			targets.append(str(args.get("new_parent", "")))
+		"delete_node", "rename_node", "set_property", "attach_script", "set_anchors_preset":
+			targets.append(str(args.get("node", "")))
+		_:
+			return ""
+	for target in targets:
+		var resolved := _resolve_scene_node(target)
+		if resolved["node"] == null:
+			return "" # let the op report not-found itself
+		var node: Node = resolved["node"]
+		if node.has_meta("_edit_lock_"):
+			return "skipped: '%s' is locked in the editor" % node.name
+		if node != root and node.owner != root:
+			return "skipped: '%s' is not owned by the edited scene (instanced or external node)" % node.name
+	return ""
 
 
 # Resolves a scene-relative (or absolute) path to a node in the edited scene.
@@ -897,6 +1149,77 @@ static func _preset_grow_directions(preset_name: String) -> Array:
 	return growers.get(preset_name.to_lower(), [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH])
 
 
+func _op_create_script(args: Dictionary) -> Dictionary:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return {"ok": false, "message": str(checked.get("error", "bad path"))}
+	var res_path: String = checked["path"]
+	var content := str(args.get("content", ""))
+	if content.strip_edges().is_empty():
+		return {"ok": false, "message": "script content is empty"}
+	if FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "'%s' already exists (won't overwrite)" % res_path}
+	var dir_err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(res_path.get_base_dir()))
+	if dir_err != OK:
+		return {"ok": false, "message": "could not create folder '%s' (error %d)" % [res_path.get_base_dir(), dir_err]}
+	var f := FileAccess.open(res_path, FileAccess.WRITE)
+	if f == null:
+		return {"ok": false, "message": "could not write '%s' (%s)" % [res_path, error_string(FileAccess.get_open_error())]}
+	f.store_string(content)
+	var write_err := f.get_error()
+	f.close()
+	if write_err != OK:
+		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	if Engine.is_editor_hint():
+		EditorInterface.get_resource_filesystem().scan()
+	return {"ok": true, "message": "created script '%s' (%d bytes; verified on disk, not undoable)" % [res_path, content.to_utf8_buffer().size()]}
+
+
+func _op_read_script(args: Dictionary) -> Dictionary:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return {"ok": false, "message": str(checked.get("error", "bad path"))}
+	var res_path: String = checked["path"]
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "'%s' does not exist" % res_path}
+	var content := FileAccess.get_file_as_string(res_path)
+	var note := ""
+	if content.length() > MAX_READ_CHARS:
+		note = " (truncated, %d total chars)" % content.length()
+		content = content.left(MAX_READ_CHARS)
+	var line_count := 0
+	if not content.is_empty():
+		line_count = content.count("\n") + 1
+	return {"ok": true, "message": "read '%s' (%d bytes, %d lines%s; content sent to model)" % [res_path, content.to_utf8_buffer().size(), line_count, note], "detail": content}
+
+
+func _op_edit_script(args: Dictionary) -> Dictionary:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return {"ok": false, "message": str(checked.get("error", "bad path"))}
+	var res_path: String = checked["path"]
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "'%s' does not exist (use create_script first)" % res_path}
+	var edited := AiClient.apply_script_edit(FileAccess.get_file_as_string(res_path), str(args.get("find", "")), str(args.get("replace", "")))
+	if not bool(edited.get("ok", false)):
+		return {"ok": false, "message": str(edited.get("error", "edit failed"))}
+	if bool(edited.get("noop", false)):
+		return {"ok": true, "message": "no change: find and replace are identical"}
+	var f := FileAccess.open(res_path, FileAccess.WRITE)
+	if f == null:
+		return {"ok": false, "message": "could not write '%s' (%s)" % [res_path, error_string(FileAccess.get_open_error())]}
+	f.store_string(str(edited.get("content", "")))
+	var write_err := f.get_error()
+	f.close()
+	if write_err != OK:
+		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
+	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
+		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	return {"ok": true, "message": "edited '%s' (1 block replaced; verified on disk, not undoable)" % res_path}
+
+
 func _op_set_anchors_preset(args: Dictionary) -> Dictionary:
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
@@ -944,6 +1267,10 @@ func _make_title(text: String) -> String:
 
 # Clear message list
 func _clear_message_list() -> void:
+	if not _pending_approval.is_empty():
+		var pending: Dictionary = _pending_approval
+		_pending_approval = {}
+		_update_pending_record(pending, str(pending.get("base_text", "")) + "\nDismissed (chat cleared) — no changes applied.")
 	for child in message_list.get_children():
 		message_list.remove_child(child)
 		child.queue_free()
@@ -953,6 +1280,7 @@ func _cancel_pending_request() -> void:
 	if client != null and client.busy:
 		client.cancel()
 	pending_ai_message = null
+	_end_loop()
 
 
 # Create a new chat
