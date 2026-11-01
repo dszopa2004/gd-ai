@@ -8,11 +8,21 @@ signal request_failed(message: String)
 signal stream_updated(full_text: String)
 signal retry_scheduled(next_attempt: int, total_attempts: int, delay_sec: float)
 signal tool_calls_received(calls: Array, preamble: String)
+signal device_code_received(user_code: String, verification_uri: String, verification_uri_complete: String, expires_in: int)
+signal sign_in_succeeded()
+signal sign_in_failed(message: String)
+signal sign_in_cancelled()
 
 const DEFAULT_API_URL := "https://api.meta.ai/v1/chat/completions" # verified: dev.meta.ai/docs
 const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
 const SETTINGS_API_URL := "plugins/gd_ai/api_url"
 const SETTINGS_MODEL := "plugins/gd_ai/model"
+const DEVICE_AUTH_URL := "https://auth.meta.com/oidc/device/authorization/"
+const DEVICE_TOKEN_URL := "https://auth.meta.com/oidc/device/token/"
+const KEY_MINT_URL := "https://api.meta.ai/muse-code/key"
+# Public OAuth client id observed from the official Muse CLI's device flow
+# (third-party agents reuse it; override if Meta issues per-app clients).
+const DEFAULT_OAUTH_CLIENT_ID := "1031625952748946"
 
 var api_key := ""
 var model := "muse-spark-1.3-contributor"
@@ -32,6 +42,10 @@ var context_prompt := "" # fresh editor snapshot per request; never stored in ch
 var max_context_chars := 4000 # clamp on injected context (<= 0 = unlimited)
 var max_history_messages := 20 # cap on history turns sent per request (<= 0 = unlimited)
 var max_history_chars := 8000 # cap on history text sent per request (<= 0 = unlimited)
+var oauth_client_id := DEFAULT_OAUTH_CLIENT_ID # public client for the device flow; override to use another
+var device_access_token := "" # OAuth device token (dca:…); step 3 persists, step 4 refreshes
+var device_refresh_token := "" # kept when the token endpoint issues one; step 4 uses it
+var sign_in_active := false # true while a device-code flow is in flight
 
 var _http: HTTPRequest
 var _stream_client: HTTPClient
@@ -56,11 +70,19 @@ var _stream_tool_calls: Dictionary = {}
 var _stream_finish_reason := ""
 var _stream_tool_announced := false
 var _history_dropped := 0
+var _oauth_http: HTTPRequest
+var _oauth_step := "" # "code" | "poll" | "mint" while awaiting that response ("wait" between polls)
+var _oauth_device_code := ""
+var _oauth_access_token := ""
+var _oauth_poll_interval := 5.0
+var _oauth_deadline_msec := 0
+var _oauth_timer: Timer
 
 
 # Generate a new HTTP request upon instantiation
 func _ready() -> void:
 	_ensure_http()
+	_ensure_oauth_http()
 	set_process(false) # enabled only while a stream is being polled
 
 
@@ -1456,3 +1478,221 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 			return "The request timed out. Lower reasoning effort or try again."
 		_:
 			return shown
+
+
+# --- Phase 4 step 2: OAuth device flow (RFC 8628) + inference-key minting.
+# Meta offers no localhost-redirect flow for third parties; the official
+# `muse login` uses device-code, so this plugin does too: request a code,
+# poll until the user approves in the browser, then mint a Model API key
+# from the device token. Ends with an in-memory session (step 3 persists
+# it, step 4 refreshes it and logs out). Uses its own HTTPRequest so chat
+# requests never interfere, and surfaces endpoint errors verbatim so the
+# first live run can confirm the exact field shapes.
+func _ensure_oauth_http() -> void:
+	if _oauth_http != null:
+		return
+	_oauth_http = HTTPRequest.new()
+	_oauth_http.timeout = 30.0
+	add_child(_oauth_http)
+	_oauth_http.request_completed.connect(_on_oauth_completed)
+
+
+func begin_device_sign_in() -> void:
+	if sign_in_active:
+		return
+	if oauth_client_id.strip_edges().is_empty():
+		sign_in_failed.emit("No OAuth client id configured.")
+		return
+	_ensure_oauth_http()
+	sign_in_active = true
+	_oauth_poll_interval = 5.0
+	_oauth_step = "code"
+	var body := "client_id=%s" % oauth_client_id.strip_edges().uri_encode()
+	var err := _oauth_http.request(DEVICE_AUTH_URL, PackedStringArray(["Content-Type: application/x-www-form-urlencoded"]), HTTPClient.METHOD_POST, body)
+	if err != OK:
+		_end_sign_in()
+		sign_in_failed.emit("Could not reach Meta sign-in (error %d)." % err)
+
+
+func cancel_device_sign_in() -> void:
+	if not sign_in_active:
+		return
+	_end_sign_in()
+	sign_in_cancelled.emit()
+
+
+func _end_sign_in() -> void:
+	sign_in_active = false
+	_oauth_step = ""
+	_oauth_device_code = ""
+	_oauth_access_token = ""
+	if _oauth_http != null:
+		_oauth_http.cancel_request()
+	if _oauth_timer != null:
+		_oauth_timer.stop()
+		_oauth_timer.queue_free()
+		_oauth_timer = null
+
+
+func _schedule_oauth_poll() -> void:
+	_oauth_step = "wait"
+	if _oauth_timer == null:
+		_oauth_timer = Timer.new()
+		_oauth_timer.one_shot = true
+		add_child(_oauth_timer)
+		_oauth_timer.timeout.connect(_on_oauth_poll_tick)
+	_oauth_timer.start(_oauth_poll_interval)
+
+
+func _on_oauth_poll_tick() -> void:
+	if not sign_in_active:
+		return
+	if Time.get_ticks_msec() > _oauth_deadline_msec:
+		_end_sign_in()
+		sign_in_failed.emit("The sign-in code expired — press Sign in to get a new one.")
+		return
+	_send_oauth_poll()
+
+
+func _send_oauth_poll() -> void:
+	_oauth_step = "poll"
+	var body := "grant_type=%s&device_code=%s&client_id=%s" % [
+		"urn:ietf:params:oauth:grant-type:device_code".uri_encode(),
+		_oauth_device_code.uri_encode(),
+		oauth_client_id.strip_edges().uri_encode(),
+	]
+	var err := _oauth_http.request(DEVICE_TOKEN_URL, PackedStringArray(["Content-Type: application/x-www-form-urlencoded"]), HTTPClient.METHOD_POST, body)
+	if err != OK:
+		_end_sign_in()
+		sign_in_failed.emit("Lost connection during sign-in (error %d)." % err)
+
+
+func _send_key_mint() -> void:
+	_oauth_step = "mint"
+	var headers := PackedStringArray([
+		"Authorization: Bearer %s" % _oauth_access_token,
+		"Content-Type: application/json",
+	])
+	var err := _oauth_http.request(KEY_MINT_URL, headers, HTTPClient.METHOD_POST, "{}")
+	if err != OK:
+		_end_sign_in()
+		sign_in_failed.emit("Lost connection while minting the session key (error %d)." % err)
+
+
+func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	var step := _oauth_step
+	if not sign_in_active or step.is_empty() or step == "wait":
+		return # stale or cancelled
+	_oauth_step = "wait" # each response is consumed exactly once
+	if result != OK:
+		_end_sign_in()
+		sign_in_failed.emit("Network error during Meta sign-in (result %d)." % result)
+		return
+	var parsed = JSON.parse_string(body.get_string_from_utf8())
+	var data: Dictionary = parsed if parsed is Dictionary else {}
+	if step == "poll" and code == 400 and data.has("error"):
+		_handle_oauth_poll_error(str(data.get("error", "")), str(data.get("error_description", "")))
+		return
+	if code < 200 or code >= 300:
+		_end_sign_in()
+		sign_in_failed.emit("Meta sign-in error (HTTP %d%s)." % [code, _oauth_error_detail(data, body)])
+		return
+	match step:
+		"code":
+			_handle_device_code(data)
+		"poll":
+			_handle_oauth_poll_success(data)
+		"mint":
+			_handle_key_mint(data, body)
+
+
+static func _oauth_error_detail(data: Dictionary, body: PackedByteArray) -> String:
+	for key in ["error_description", "error", "message"]:
+		var v := str(data.get(key, "")).strip_edges()
+		if not v.is_empty():
+			return ": %s" % v
+	var text := body.get_string_from_utf8().strip_edges()
+	if text.is_empty():
+		return ""
+	return ": %s" % text.left(120)
+
+
+func _handle_device_code(data: Dictionary) -> void:
+	var device_code := str(data.get("device_code", "")).strip_edges()
+	var user_code := str(data.get("user_code", "")).strip_edges()
+	var uri := str(data.get("verification_uri", "")).strip_edges()
+	var uri_complete := str(data.get("verification_uri_complete", "")).strip_edges()
+	if device_code.is_empty() or user_code.is_empty() or uri.is_empty():
+		_end_sign_in()
+		sign_in_failed.emit("Meta sign-in returned an incomplete device code.")
+		return
+	_oauth_device_code = device_code
+	_oauth_poll_interval = float(data.get("interval", 5.0))
+	if _oauth_poll_interval < 1.0:
+		_oauth_poll_interval = 1.0
+	var expires_in := int(data.get("expires_in", 600))
+	if expires_in <= 0:
+		expires_in = 600
+	_oauth_deadline_msec = Time.get_ticks_msec() + expires_in * 1000
+	device_code_received.emit(user_code, uri, uri_complete, expires_in)
+	_schedule_oauth_poll()
+
+
+func _handle_oauth_poll_error(err: String, desc: String) -> void:
+	match err:
+		"authorization_pending":
+			_schedule_oauth_poll()
+		"slow_down":
+			_oauth_poll_interval += 5.0
+			_schedule_oauth_poll()
+		"access_denied":
+			_end_sign_in()
+			sign_in_failed.emit("Sign-in was denied in the browser.")
+		"expired_token":
+			_end_sign_in()
+			sign_in_failed.emit("The sign-in code expired — press Sign in to get a new one.")
+		_:
+			_end_sign_in()
+			var detail := ": %s" % desc if not desc.is_empty() else ""
+			var name := err if not err.is_empty() else "unknown"
+			sign_in_failed.emit("Meta sign-in error (%s%s)." % [name, detail])
+
+
+func _handle_oauth_poll_success(data: Dictionary) -> void:
+	var token := str(data.get("access_token", "")).strip_edges()
+	if token.is_empty():
+		_end_sign_in()
+		sign_in_failed.emit("Meta sign-in finished without an access token.")
+		return
+	_oauth_access_token = token
+	device_access_token = token
+	device_refresh_token = str(data.get("refresh_token", "")).strip_edges()
+	_send_key_mint()
+
+
+func _handle_key_mint(data: Dictionary, body: PackedByteArray) -> void:
+	var key := _extract_minted_key(data)
+	if key.is_empty():
+		_end_sign_in()
+		sign_in_failed.emit("Key mint returned no usable key%s." % _oauth_error_detail(data, body))
+		return
+	api_key = key
+	_end_sign_in()
+	print("[GdAI] Meta sign-in complete: inference key minted (%s)." % fingerprint(api_key))
+	sign_in_succeeded.emit()
+
+
+# The mint response shape is undocumented; accept the key under any usual
+# field name, top-level or nested under "data".
+static func _extract_minted_key(data: Dictionary) -> String:
+	for field in ["key", "api_key", "access_token", "token", "inference_key"]:
+		var v := str(data.get(field, "")).strip_edges()
+		if not v.is_empty():
+			return _sanitize_key(v)
+	var nested = data.get("data", {})
+	if nested is Dictionary:
+		for field in ["key", "api_key", "access_token", "token", "inference_key"]:
+			var v := str(nested.get(field, "")).strip_edges()
+			if not v.is_empty():
+				return _sanitize_key(v)
+	return ""
