@@ -12,11 +12,16 @@ signal device_code_received(user_code: String, verification_uri: String, verific
 signal sign_in_succeeded()
 signal sign_in_failed(message: String)
 signal sign_in_cancelled()
+signal session_expired()
 
 const DEFAULT_API_URL := "https://api.meta.ai/v1/chat/completions" # verified: dev.meta.ai/docs
 const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
 const SETTINGS_API_URL := "plugins/gd_ai/api_url"
 const SETTINGS_MODEL := "plugins/gd_ai/model"
+const SETTINGS_OAUTH_DEVICE_TOKEN := "plugins/gd_ai/oauth_device_token"
+const SETTINGS_OAUTH_REFRESH_TOKEN := "plugins/gd_ai/oauth_refresh_token"
+const SETTINGS_SESSION_MINTED_AT := "plugins/gd_ai/session_minted_at"
+const REFRESH_AFTER_SEC := 72000 # re-mint past 20h; minted keys reportedly live ~24h
 const DEVICE_AUTH_URL := "https://auth.meta.com/oidc/device/authorization/"
 const DEVICE_TOKEN_URL := "https://auth.meta.com/oidc/device/token/"
 const KEY_MINT_URL := "https://api.meta.ai/muse-code/key"
@@ -43,8 +48,10 @@ var max_context_chars := 4000 # clamp on injected context (<= 0 = unlimited)
 var max_history_messages := 20 # cap on history turns sent per request (<= 0 = unlimited)
 var max_history_chars := 8000 # cap on history text sent per request (<= 0 = unlimited)
 var oauth_client_id := DEFAULT_OAUTH_CLIENT_ID # public client for the device flow; override to use another
-var device_access_token := "" # OAuth device token (dca:…); step 3 persists, step 4 refreshes
+var device_access_token := "" # OAuth device token (dca:…); persisted by save_session, refreshed by step 4
 var device_refresh_token := "" # kept when the token endpoint issues one; step 4 uses it
+var meta_session := false # true when the active credential came from Meta sign-in (this boot or restored)
+var session_minted_at := 0 # unix seconds of the last mint (0 = unknown/pre-step-4)
 var sign_in_active := false # true while a device-code flow is in flight
 
 var _http: HTTPRequest
@@ -77,6 +84,10 @@ var _oauth_access_token := ""
 var _oauth_poll_interval := 5.0
 var _oauth_deadline_msec := 0
 var _oauth_timer: Timer
+var _refreshing_for_retry := false # a chat 401 kicked off a silent re-mint; the send resumes after
+var _refresh_generation := -1 # request generation the pending re-mint belongs to
+var _refresh_quiet := false # background refresh: failures keep the old key and stay silent
+var _refreshed_this_request := false # at most one re-mint per chat request
 
 
 # Generate a new HTTP request upon instantiation
@@ -113,6 +124,9 @@ func load_config() -> void:
 		stored_key = _get_editor_setting(settings, SETTINGS_API_KEY)
 		stored_url = _get_editor_setting(settings, SETTINGS_API_URL)
 		stored_model = _get_editor_setting(settings, SETTINGS_MODEL)
+		device_access_token = _get_editor_setting(settings, SETTINGS_OAUTH_DEVICE_TOKEN).strip_edges()
+		device_refresh_token = _get_editor_setting(settings, SETTINGS_OAUTH_REFRESH_TOKEN).strip_edges()
+		session_minted_at = int(_get_editor_setting(settings, SETTINGS_SESSION_MINTED_AT))
 	api_key = stored_key.strip_edges()
 	api_url = stored_url.strip_edges()
 	if not stored_model.strip_edges().is_empty():
@@ -126,8 +140,10 @@ func load_config() -> void:
 	if api_key.is_empty():
 		push_warning("[GdAI] No API key configured. Open GdAI Settings or set MODEL_API_KEY.")
 		return
+	meta_session = not device_access_token.is_empty()
 	var source := "env" if not env_key.is_empty() else "settings"
-	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]." % [model, _effective_url(), fingerprint(api_key), source])
+	var sess := " session=meta" if meta_session else ""
+	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]%s." % [model, _effective_url(), fingerprint(api_key), source, sess])
 
 
 # Persists the current key, endpoint, and model for the next session.
@@ -138,6 +154,32 @@ func save_config() -> void:
 	settings.set_setting(SETTINGS_API_KEY, api_key.strip_edges())
 	settings.set_setting(SETTINGS_API_URL, api_url.strip_edges())
 	settings.set_setting(SETTINGS_MODEL, model.strip_edges())
+
+
+# Persists the OAuth session (step 3): device + refresh tokens alongside the
+# minted key, which lives in the regular api_key slot. EditorSettings only —
+# user-local editor config, never project files.
+func save_session() -> void:
+	if not Engine.is_editor_hint():
+		return
+	save_config() # persists api_key (minted), endpoint, model
+	var settings := EditorInterface.get_editor_settings()
+	settings.set_setting(SETTINGS_OAUTH_DEVICE_TOKEN, device_access_token.strip_edges())
+	settings.set_setting(SETTINGS_OAUTH_REFRESH_TOKEN, device_refresh_token.strip_edges())
+	settings.set_setting(SETTINGS_SESSION_MINTED_AT, session_minted_at)
+
+
+# Drops the stored OAuth session (tokens only; api_key untouched). Step 4
+# wires this to logout; settings-save calls it when switching credentials.
+func clear_session() -> void:
+	device_access_token = ""
+	device_refresh_token = ""
+	meta_session = false
+	if not Engine.is_editor_hint():
+		return
+	var settings := EditorInterface.get_editor_settings()
+	settings.set_setting(SETTINGS_OAUTH_DEVICE_TOKEN, "")
+	settings.set_setting(SETTINGS_OAUTH_REFRESH_TOKEN, "")
 
 
 # Sends a message to ai with adjusted settings
@@ -174,6 +216,7 @@ func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 	if _history_dropped > 0:
 		print("[GdAI] Trimmed %d oldest %s to fit the history budget." % [_history_dropped, "message" if _history_dropped == 1 else "messages"])
 	_retry_attempt = 0
+	_refreshed_this_request = false
 	if reset_fallback:
 		_json_fallback_active = false
 	_request_generation += 1
@@ -848,6 +891,8 @@ func _finish_stream_error_from_body() -> void:
 		return
 	if _maybe_start_json_fallback(code, parsed):
 		return
+	if code == 401 and _maybe_refresh_session():
+		return
 	if _is_retryable_code(code) and _retry_attempt < max_retries:
 		var wait := 0.0
 		if code == 429:
@@ -1389,6 +1434,8 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 			return
 		if _maybe_start_json_fallback(code, parsed):
 			return
+		if code == 401 and _maybe_refresh_session():
+			return
 		if _is_retryable_code(code) and _retry_attempt < max_retries:
 			var wait := 0.0
 			if code == 429:
@@ -1484,8 +1531,8 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 # Meta offers no localhost-redirect flow for third parties; the official
 # `muse login` uses device-code, so this plugin does too: request a code,
 # poll until the user approves in the browser, then mint a Model API key
-# from the device token. Ends with an in-memory session (step 3 persists
-# it, step 4 refreshes it and logs out). Uses its own HTTPRequest so chat
+# from the device token. The session is persisted by save_session (step 4
+# refreshes it and logs out). Uses its own HTTPRequest so chat
 # requests never interfere, and surfaces endpoint errors verbatim so the
 # first live run can confirm the exact field shapes.
 func _ensure_oauth_http() -> void:
@@ -1517,7 +1564,14 @@ func begin_device_sign_in() -> void:
 func cancel_device_sign_in() -> void:
 	if not sign_in_active:
 		return
+	var resend := _refreshing_for_retry
 	_end_sign_in()
+	_refreshing_for_retry = false
+	_refresh_quiet = false
+	if resend:
+		busy = false
+		_expecting_response = false
+		_request_generation += 1
 	sign_in_cancelled.emit()
 
 
@@ -1575,8 +1629,70 @@ func _send_key_mint() -> void:
 	])
 	var err := _oauth_http.request(KEY_MINT_URL, headers, HTTPClient.METHOD_POST, "{}")
 	if err != OK:
-		_end_sign_in()
-		sign_in_failed.emit("Lost connection while minting the session key (error %d)." % err)
+		_fail_mint("Lost connection while minting the session key (error %d)." % err)
+
+
+# Step 4: transparent session refresh. Re-mints the inference key from the
+# stored device token (no browser needed). quiet=true is the background
+# boot refresh: failures keep the stored key and stay silent.
+func refresh_session(quiet := false) -> void:
+	if sign_in_active or device_access_token.strip_edges().is_empty():
+		return
+	_refresh_quiet = quiet
+	_oauth_access_token = device_access_token.strip_edges()
+	sign_in_active = true
+	_ensure_oauth_http()
+	_send_key_mint()
+
+
+# True when a Meta session exists but its key is older than the refresh
+# horizon (or was minted before step 4 tracked time).
+func session_is_stale() -> bool:
+	if not meta_session or device_access_token.strip_edges().is_empty():
+		return false
+	if session_minted_at <= 0:
+		return true
+	return Time.get_unix_time_from_system() - session_minted_at > REFRESH_AFTER_SEC
+
+
+# 401 recovery for chat requests: one silent re-mint per request, then the
+# original send resumes with the fresh key. Returns true when a refresh
+# started (the caller must not fail the request yet).
+func _maybe_refresh_session() -> bool:
+	if not meta_session or device_access_token.strip_edges().is_empty():
+		return false
+	if _refreshed_this_request or sign_in_active:
+		return false
+	_refreshed_this_request = true
+	_refreshing_for_retry = true
+	_refresh_generation = _request_generation
+	busy = true # hold the request slot across the mint
+	print("[GdAI] Chat key rejected (401); re-minting session key…")
+	refresh_session(false)
+	return true
+
+
+# Single exit point for mint failures: background refreshes keep the old
+# key silently, request-triggered ones end the session loudly, and the
+# interactive flow reports sign-in failure.
+func _fail_mint(message: String) -> void:
+	var resend := _refreshing_for_retry
+	var quiet := _refresh_quiet
+	_end_sign_in()
+	_refreshing_for_retry = false
+	_refresh_quiet = false
+	if quiet:
+		print("[GdAI] Background session refresh failed (%s); keeping the stored key." % message)
+		return
+	if resend:
+		busy = false
+		_expecting_response = false
+		api_key = ""
+		save_config()
+		clear_session()
+		session_expired.emit()
+	else:
+		sign_in_failed.emit(message)
 
 
 func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -1585,8 +1701,7 @@ func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, bo
 		return # stale or cancelled
 	_oauth_step = "wait" # each response is consumed exactly once
 	if result != OK:
-		_end_sign_in()
-		sign_in_failed.emit("Network error during Meta sign-in (result %d)." % result)
+		_fail_mint("Network error during Meta sign-in (result %d)." % result)
 		return
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
 	var data: Dictionary = parsed if parsed is Dictionary else {}
@@ -1594,8 +1709,7 @@ func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, bo
 		_handle_oauth_poll_error(str(data.get("error", "")), str(data.get("error_description", "")))
 		return
 	if code < 200 or code >= 300:
-		_end_sign_in()
-		sign_in_failed.emit("Meta sign-in error (HTTP %d%s)." % [code, _oauth_error_detail(data, body)])
+		_fail_mint("Meta sign-in error (HTTP %d%s)." % [code, _oauth_error_detail(data, body)])
 		return
 	match step:
 		"code":
@@ -1673,13 +1787,30 @@ func _handle_oauth_poll_success(data: Dictionary) -> void:
 func _handle_key_mint(data: Dictionary, body: PackedByteArray) -> void:
 	var key := _extract_minted_key(data)
 	if key.is_empty():
-		_end_sign_in()
-		sign_in_failed.emit("Key mint returned no usable key%s." % _oauth_error_detail(data, body))
+		_fail_mint("Key mint returned no usable key%s." % _oauth_error_detail(data, body))
 		return
 	api_key = key
+	meta_session = true
+	session_minted_at = int(Time.get_unix_time_from_system())
+	save_session()
+	var resend := _refreshing_for_retry
+	var quiet := _refresh_quiet
+	var gen := _refresh_generation
 	_end_sign_in()
-	print("[GdAI] Meta sign-in complete: inference key minted (%s)." % fingerprint(api_key))
-	sign_in_succeeded.emit()
+	_refreshing_for_retry = false
+	_refresh_quiet = false
+	if resend or quiet:
+		print("[GdAI] Session key refreshed (%s)." % fingerprint(api_key))
+	else:
+		print("[GdAI] Meta sign-in complete: inference key minted (%s)." % fingerprint(api_key))
+	if resend:
+		if gen != _request_generation:
+			busy = false
+			_expecting_response = false
+			return # cancelled or superseded while minting
+		_start_request()
+	else:
+		sign_in_succeeded.emit()
 
 
 # The mint response shape is undocumented; accept the key under any usual

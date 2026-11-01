@@ -69,7 +69,7 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -99,6 +99,7 @@ session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPa
 sign_in_code_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/SignIncodeLineEdit")
 sign_in_open_browser_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/OpenBrowserButton")
 sign_in_cancel_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/CancelSignInButton")
+sign_out_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/SignoutButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -158,7 +159,6 @@ theme_override_styles/panel = SubResource("StyleBoxFlat_dq450")
 layout_mode = 2
 
 [node name="ChatMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=4841635]
-visible = false
 layout_mode = 2
 size_flags_vertical = 3
 
@@ -252,6 +252,7 @@ layout_mode = 2
 text = "New Chat"
 
 [node name="SettingsMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=1285205619]
+visible = false
 layout_mode = 2
 size_flags_vertical = 3
 
@@ -284,7 +285,7 @@ text = "API Key"
 [node name="ApiKeyField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer" unique_id=1854238892]
 layout_mode = 2
 size_flags_horizontal = 3
-text = "LLM_1450434533705611_9pVKnQt_-mO8BWStIxPr5JvZ6xk"
+text = ""
 placeholder_text = "Paste Model API Key, or leave empty to use MODEL_API_KEY"
 clear_button_enabled = true
 secret = true
@@ -326,6 +327,11 @@ popup/item_3/id = 3
 layout_mode = 2
 text = "Login"
 
+[node name="SignoutButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=718311561]
+layout_mode = 2
+size_flags_horizontal = 4
+text = "Sign Out"
+
 [node name="SignIncodeLineEdit" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=583039340]
 visible = false
 layout_mode = 2
@@ -347,7 +353,7 @@ text = "Cancel Sign-in"
 
 [node name="SessionStatusLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1180374315]
 layout_mode = 2
-text = "Using MODEL_API_KEY from the environment (dev)."
+text = "Signed in with Meta."
 horizontal_alignment = 1
 autowrap_mode = 3
 

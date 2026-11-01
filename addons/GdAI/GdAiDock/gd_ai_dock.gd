@@ -33,6 +33,7 @@ extends Control
 @export var sign_in_code_field: LineEdit
 @export var sign_in_open_browser_button: Button
 @export var sign_in_cancel_button: Button
+@export var sign_out_button: Button # stacked with sign_in_button; visibility swaps by session
 
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
@@ -97,10 +98,13 @@ func _ready() -> void:
 	client.sign_in_succeeded.connect(_on_sign_in_succeeded)
 	client.sign_in_failed.connect(_on_sign_in_failed)
 	client.sign_in_cancelled.connect(_on_sign_in_cancelled)
+	client.session_expired.connect(_on_session_expired)
 	client.load_config()
 	_setup_settings_ui()
 	_setup_sign_in_ui()
 	_update_session_status()
+	if client.session_is_stale():
+		client.refresh_session(true)
 
 	# Remember the send button's scene appearance so cancel mode can restore it.
 	_send_button_text = send_button.text
@@ -803,6 +807,8 @@ func _select_model(model_name: String) -> void:
 func _on_settings_saved() -> void:
 	if client == null:
 		return
+	var switching := client.meta_session and api_key_field != null \
+		and api_key_field.text.strip_edges() != client.api_key.strip_edges()
 	if api_key_field != null:
 		client.api_key = api_key_field.text.strip_edges()
 	if endpoint_field != null:
@@ -811,6 +817,8 @@ func _on_settings_saved() -> void:
 		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
 		if not picked.is_empty():
 			client.model = picked
+	if switching:
+		client.clear_session() # typed key replaces the Meta session
 	client.save_config()
 	client.load_config()
 	_update_session_status()
@@ -836,6 +844,10 @@ func _setup_sign_in_ui() -> void:
 		push_warning("[GdAI] Sign-in cancel button export is unassigned.")
 	if sign_in_code_field == null:
 		push_warning("[GdAI] Sign-in code field export is unassigned.")
+	if sign_out_button != null:
+		sign_out_button.pressed.connect(_on_sign_out_button_pressed)
+	else:
+		push_warning("[GdAI] Sign-out button export is unassigned.")
 	_set_sign_in_flow_visible(false)
 
 
@@ -884,11 +896,12 @@ func _on_sign_in_cancel_pressed() -> void:
 
 func _on_sign_in_succeeded() -> void:
 	_sign_in_uri = ""
+	_update_auth_buttons()
 	_set_sign_in_flow_visible(false)
 	if sign_in_button != null:
 		sign_in_button.disabled = false
 	if session_status_label != null:
-		session_status_label.text = "Signed in with Meta (session key minted; restart signs out until step 3)."
+		session_status_label.text = "Signed in with Meta."
 
 
 func _on_sign_in_failed(message: String) -> void:
@@ -908,15 +921,45 @@ func _on_sign_in_cancelled() -> void:
 	_update_session_status()
 
 
-# Session status from current auth state. Later Phase 4 steps extend this
-# with token state, expiry, and logout.
+# Step 4: one stacked button slot shows sign-in or sign-out by session.
+func _update_auth_buttons() -> void:
+	var signed_in := client != null and client.meta_session
+	if sign_in_button != null:
+		sign_in_button.visible = not signed_in
+	if sign_out_button != null:
+		sign_out_button.visible = signed_in
+
+
+func _on_sign_out_button_pressed() -> void:
+	if client == null:
+		return
+	if client.sign_in_active:
+		client.cancel_device_sign_in()
+	client.clear_session()
+	client.api_key = ""
+	client.save_config()
+	_sync_settings_fields()
+	_update_session_status()
+
+
+func _on_session_expired() -> void:
+	_update_session_status() # session already cleared; flips status + buttons
+	_on_ai_error("Meta session expired — press Sign in to sign in again.")
+
+
+# Session status from current auth state. Buttons update here too so every
+# status refresh keeps the sign-in/sign-out slot correct.
 func _update_session_status() -> void:
+	_update_auth_buttons()
 	if session_status_label == null:
 		return
 	if client == null or client.api_key.strip_edges().is_empty():
 		session_status_label.text = "Signed out — no API key configured."
 		return
-	if not OS.get_environment("MODEL_API_KEY").strip_edges().is_empty():
+	var env_key := OS.get_environment("MODEL_API_KEY").strip_edges()
+	if client.meta_session and env_key.is_empty():
+		session_status_label.text = "Signed in with Meta."
+	elif not env_key.is_empty():
 		session_status_label.text = "Using MODEL_API_KEY from the environment (dev)."
 	else:
 		session_status_label.text = "API key loaded from editor settings."
