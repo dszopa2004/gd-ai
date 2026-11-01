@@ -30,6 +30,9 @@ extends Control
 @export_category("Sign In")
 @export var sign_in_button: Button
 @export var session_status_label: Label
+@export var sign_in_code_field: LineEdit
+@export var sign_in_open_browser_button: Button
+@export var sign_in_cancel_button: Button
 
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
@@ -58,6 +61,7 @@ var _loop_count := 0 # tool turns received this user message
 var _loop_generation := 0 # user-message stamp; an approval from an older generation never continues the loop
 var _continue_button = null # live Continue button, if a capped turn is resumable
 var _continue_generation := -1 # user-message stamp the live Continue button belongs to
+var _sign_in_uri := "" # verification URL for the in-flight device flow (step 2)
 
 func _ready() -> void:
 	# Tab button signals
@@ -89,6 +93,10 @@ func _ready() -> void:
 	# rendered as text until Phase 2 executes them.
 	client.tools = AiClient.default_tools() # Set to [] to use less tokens by not using tools
 	client.tool_calls_received.connect(_on_ai_tool_calls)
+	client.device_code_received.connect(_on_device_code_received)
+	client.sign_in_succeeded.connect(_on_sign_in_succeeded)
+	client.sign_in_failed.connect(_on_sign_in_failed)
+	client.sign_in_cancelled.connect(_on_sign_in_cancelled)
 	client.load_config()
 	_setup_settings_ui()
 	_setup_sign_in_ui()
@@ -818,14 +826,86 @@ func _setup_sign_in_ui() -> void:
 		push_warning("[GdAI] Sign-in button export is unassigned.")
 	if session_status_label == null:
 		push_warning("[GdAI] Session status label export is unassigned.")
+	if sign_in_open_browser_button != null:
+		sign_in_open_browser_button.pressed.connect(_on_sign_in_open_browser_pressed)
+	else:
+		push_warning("[GdAI] Sign-in browser button export is unassigned.")
+	if sign_in_cancel_button != null:
+		sign_in_cancel_button.pressed.connect(_on_sign_in_cancel_pressed)
+	else:
+		push_warning("[GdAI] Sign-in cancel button export is unassigned.")
+	if sign_in_code_field == null:
+		push_warning("[GdAI] Sign-in code field export is unassigned.")
+	_set_sign_in_flow_visible(false)
 
 
-# Step 1 stub: the OAuth browser flow arrives in step 2. Until then, jump
-# to Settings where the API key field lives.
+# Flow-only nodes (code + browser + cancel) show only mid-sign-in.
+func _set_sign_in_flow_visible(v: bool) -> void:
+	if sign_in_code_field != null:
+		sign_in_code_field.visible = v
+	if sign_in_open_browser_button != null:
+		sign_in_open_browser_button.visible = v
+	if sign_in_cancel_button != null:
+		sign_in_cancel_button.visible = v
+
+
+# Step 2: start the OAuth device flow; the code arrives via signal.
 func _on_sign_in_button_pressed() -> void:
-	_on_settings_button_pressed()
+	if client == null or client.sign_in_active:
+		return
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = true
 	if session_status_label != null:
-		session_status_label.text = "Meta sign-in is not implemented yet — paste an API key in Settings."
+		session_status_label.text = "Contacting Meta sign-in…"
+	client.begin_device_sign_in()
+
+
+func _on_device_code_received(user_code: String, verification_uri: String, verification_uri_complete: String, _expires_in: int) -> void:
+	_sign_in_uri = verification_uri_complete if not verification_uri_complete.is_empty() else verification_uri
+	if sign_in_code_field != null:
+		sign_in_code_field.text = user_code
+		sign_in_code_field.editable = false
+	_set_sign_in_flow_visible(true)
+	if session_status_label != null:
+		session_status_label.text = "Enter code %s at %s (or press Open browser), then approve." % [user_code, verification_uri]
+
+
+func _on_sign_in_open_browser_pressed() -> void:
+	if not _sign_in_uri.is_empty():
+		OS.shell_open(_sign_in_uri)
+
+
+func _on_sign_in_cancel_pressed() -> void:
+	if client != null:
+		client.cancel_device_sign_in()
+
+
+func _on_sign_in_succeeded() -> void:
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = false
+	if session_status_label != null:
+		session_status_label.text = "Signed in with Meta (session key minted; restart signs out until step 3)."
+
+
+func _on_sign_in_failed(message: String) -> void:
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = false
+	if session_status_label != null:
+		session_status_label.text = "Sign-in failed: %s" % message
+
+
+func _on_sign_in_cancelled() -> void:
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = false
+	_update_session_status()
 
 
 # Session status from current auth state. Later Phase 4 steps extend this
