@@ -27,6 +27,10 @@ extends Control
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
 
+@export_category("Sign In")
+@export var sign_in_button: Button
+@export var session_status_label: Label
+
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
 const BUBBLE_RATIO := 1.0
@@ -87,6 +91,8 @@ func _ready() -> void:
 	client.tool_calls_received.connect(_on_ai_tool_calls)
 	client.load_config()
 	_setup_settings_ui()
+	_setup_sign_in_ui()
+	_update_session_status()
 
 	# Remember the send button's scene appearance so cancel mode can restore it.
 	_send_button_text = send_button.text
@@ -799,6 +805,41 @@ func _on_settings_saved() -> void:
 			client.model = picked
 	client.save_config()
 	client.load_config()
+	_update_session_status()
+
+
+# Phase 4 step 1: sign-in button + session status. The nodes live in the
+# scene tree; these exports are wired in the editor. Everything is
+# null-guarded so the dock runs before the nodes exist.
+func _setup_sign_in_ui() -> void:
+	if sign_in_button != null:
+		sign_in_button.pressed.connect(_on_sign_in_button_pressed)
+	else:
+		push_warning("[GdAI] Sign-in button export is unassigned.")
+	if session_status_label == null:
+		push_warning("[GdAI] Session status label export is unassigned.")
+
+
+# Step 1 stub: the OAuth browser flow arrives in step 2. Until then, jump
+# to Settings where the API key field lives.
+func _on_sign_in_button_pressed() -> void:
+	_on_settings_button_pressed()
+	if session_status_label != null:
+		session_status_label.text = "Meta sign-in is not implemented yet — paste an API key in Settings."
+
+
+# Session status from current auth state. Later Phase 4 steps extend this
+# with token state, expiry, and logout.
+func _update_session_status() -> void:
+	if session_status_label == null:
+		return
+	if client == null or client.api_key.strip_edges().is_empty():
+		session_status_label.text = "Signed out — no API key configured."
+		return
+	if not OS.get_environment("MODEL_API_KEY").strip_edges().is_empty():
+		session_status_label.text = "Using MODEL_API_KEY from the environment (dev)."
+	else:
+		session_status_label.text = "API key loaded from editor settings."
 
 
 # Set title
