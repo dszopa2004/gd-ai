@@ -138,7 +138,7 @@ func load_config() -> void:
 	if not env_url.is_empty():
 		api_url = env_url
 	if api_key.is_empty():
-		push_warning("[GdAI] No API key configured. Open GdAI Settings or set MODEL_API_KEY.")
+		push_warning("[GdAI] No API key configured. Press Sign in, or paste a key in GdAI Settings (MODEL_API_KEY also works).")
 		return
 	meta_session = not device_access_token.is_empty()
 	var source := "env" if not env_key.is_empty() else "settings"
@@ -202,10 +202,10 @@ func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 		return
 	var key := _sanitize_key(api_key)
 	if key.is_empty():
-		request_failed.emit("No API key set. Set the MODEL_API_KEY environment variable and fully relaunch the editor (Cmd+Q, not just reopen the project).")
+		request_failed.emit("No API key set. Press Sign in to log in with Meta, or paste a key in GdAI Settings.")
 		return
 	if _looks_like_placeholder(key):
-		request_failed.emit("MODEL_API_KEY looks like a placeholder. Paste the real key and fully relaunch the editor.")
+		request_failed.emit("That API key looks like a placeholder. Press Sign in, or paste the real key in GdAI Settings.")
 		return
 	if key.contains(" ") or key.contains("\t") or key.contains("\n") or key.contains("\r"):
 		request_failed.emit("API key contains spaces or line breaks. Re-copy it without quotes or extra characters.")
@@ -231,7 +231,7 @@ func _start_request() -> void:
 	if key.is_empty():
 		busy = false
 		_expecting_response = false
-		request_failed.emit("No API key set. Set the MODEL_API_KEY environment variable and fully relaunch the editor (Cmd+Q, not just reopen the project).")
+		request_failed.emit("No API key set. Press Sign in to log in with Meta, or paste a key in GdAI Settings.")
 		return
 
 	# Handle if already streaming
@@ -1503,7 +1503,7 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 		400:
 			return "Bad request. (%s)" % shown
 		401:
-			return "Invalid or missing API key. (%s) Use a key from dev.meta.ai API keys (starts with LLM_), add a billing card (no free tier), fully quit and relaunch Godot. Endpoint: %s" % [shown, _effective_url()]
+			return "Invalid or missing API key. (%s) Press Sign in to log in with Meta, or use a key from dev.meta.ai API keys (starts with LLM_) — add a billing card (no free tier). Endpoint: %s" % [shown, _effective_url()]
 		402:
 			return "Billing issue on your Meta Model API account. (%s)" % shown
 		403:
