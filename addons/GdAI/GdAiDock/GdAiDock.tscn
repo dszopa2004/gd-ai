@@ -69,7 +69,7 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "sign_in_button", "session_status_label")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -94,6 +94,8 @@ settings_save_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPa
 api_key_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer/ApiKeyField")
 endpoint_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer/EndpointField")
 model_picker = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer/ModelPicker")
+sign_in_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/LoginButton")
+session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/SeesionStatusLabel")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -316,6 +318,15 @@ popup/item_2/text = "muse-spark-1.2"
 popup/item_2/id = 2
 popup/item_3/text = "muse-spark-1.1"
 popup/item_3/id = 3
+
+[node name="LoginButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1641213546]
+layout_mode = 2
+text = "Login"
+
+[node name="SeesionStatusLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1180374315]
+layout_mode = 2
+size_flags_horizontal = 4
+autowrap_mode = 3
 
 [node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer" unique_id=73023715]
 layout_mode = 2
