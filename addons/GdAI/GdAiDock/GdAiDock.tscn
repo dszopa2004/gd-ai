@@ -168,7 +168,6 @@ theme_override_styles/panel = SubResource("StyleBoxFlat_dq450")
 layout_mode = 2
 
 [node name="ChatMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=4841635]
-visible = false
 layout_mode = 2
 size_flags_vertical = 3
 
@@ -262,6 +261,7 @@ layout_mode = 2
 text = "New Chat"
 
 [node name="SettingsMenu" type="Control" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer" unique_id=1285205619]
+visible = false
 layout_mode = 2
 size_flags_vertical = 3
 
