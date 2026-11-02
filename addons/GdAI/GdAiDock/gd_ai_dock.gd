@@ -44,6 +44,7 @@ const TREE_NODE_BUDGET := 60
 const TREE_DEPTH_BUDGET := 8
 const SELECTION_BUDGET := 8
 const OPEN_SCRIPT_BUDGET := 1500 # open-script excerpt cap (chars); the model uses read_script past it
+const SCRIPT_PREVIEW_LINES := 24 # max diff/content lines shown per script call in the plan
 # Control.LayoutMode enum values (the enum itself is not exposed to scripts; verified on 4.6).
 const LAYOUT_MODE_POSITION := 0
 const LAYOUT_MODE_ANCHORS := 1
@@ -286,9 +287,14 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
 	if not all_finish:
 		lines.append("Planned actions:")
+		var planned_creates := _planned_script_creates(calls)
 		for call in calls:
 			if call is Dictionary:
-				lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+				var fname := str(call.get("name", ""))
+				if fname == "create_script" or fname == "edit_script":
+					lines.append_array(_script_plan_lines(fname, call.get("arguments", {}), planned_creates))
+				else:
+					lines.append("• %s %s" % [fname, JSON.stringify(call.get("arguments", {}))])
 	if calls.is_empty():
 		_end_loop() # nothing to approve or run; the turn is over
 	var capped := false
@@ -340,8 +346,9 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		_show_continue_row()
 
 
-# Approval policy: a turn pauses for approval only if it contains a
-# destructive action; everything else runs (and loops) without clicks.
+# Approval policy: a turn pauses for approval when it deletes a node or
+# writes a script (disk writes are not undoable); everything else runs
+# without clicks.
 static func _turn_needs_approval(calls: Array) -> bool:
 	for call in calls:
 		if call is Dictionary and _is_destructive_action(str(call.get("name", ""))):
@@ -349,11 +356,163 @@ static func _turn_needs_approval(calls: Array) -> bool:
 	return false
 
 
-# Destructive = deleting a node. NOTE: file writes (create/edit_script) are
-# NOT undoable, unlike node deletion — add their names here to gate them
-# behind approval again.
+# Gated actions: node deletion plus script writes (Phase 5 step 3 — disk
+# writes are NOT undoable, so they preview + approve like deletes).
 static func _is_destructive_action(fname: String) -> bool:
-	return fname == "delete_node"
+	return fname in ["delete_node", "create_script", "edit_script"]
+
+
+# First pass over a turn's calls: res_path -> content for valid same-turn
+# creates, so edit previews can resolve against planned new files.
+static func _planned_script_creates(calls: Array) -> Dictionary:
+	var out := {}
+	for call in calls:
+		if not call is Dictionary or str(call.get("name", "")) != "create_script":
+			continue
+		var args = call.get("arguments", {})
+		if not args is Dictionary:
+			continue
+		var checked := AiClient.validate_script_path(str(args.get("path", "")))
+		if not bool(checked.get("ok", false)):
+			continue
+		var content := str(args.get("content", ""))
+		if content.strip_edges().is_empty():
+			continue
+		var res_path: String = checked["path"]
+		if FileAccess.file_exists(res_path) or out.has(res_path):
+			continue
+		out[res_path] = content
+	return out
+
+
+# Plan-time preview lines for script writes: compact bullet + diff (or a ⚠
+# when the call would fail). Advisory only; execution re-validates.
+static func _script_plan_lines(fname: String, args: Variant, planned_creates: Dictionary) -> Array[String]:
+	if not args is Dictionary:
+		return ["• %s (invalid arguments — execution will report the error)" % fname]
+	if fname == "create_script":
+		return _create_preview_lines(args, planned_creates)
+	return _edit_preview_lines(args, planned_creates)
+
+
+static func _create_preview_lines(args: Dictionary, planned_creates: Dictionary) -> Array[String]:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return ["• create_script (bad path: %s)" % str(checked.get("error", "bad path"))]
+	var res_path: String = checked["path"]
+	var content := str(args.get("content", ""))
+	if content.strip_edges().is_empty():
+		return ["• create_script %s\n  ⚠ script content is empty" % res_path]
+	if FileAccess.file_exists(res_path):
+		return ["• create_script %s\n  ⚠ already exists (won't overwrite)" % res_path]
+	if not planned_creates.has(res_path):
+		return ["• create_script %s\n  ⚠ duplicate create in the same turn (later one fails)" % res_path]
+	var out: Array[String] = ["• create_script %s (new file)" % res_path]
+	var all_content := content.split("\n")
+	var shown := 0
+	for ln in all_content:
+		if shown >= SCRIPT_PREVIEW_LINES:
+			out.append("  … (%d more lines)" % (all_content.size() - shown))
+			break
+		out.append("  + " + _preview_clip(ln))
+		shown += 1
+	return out
+
+
+static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -> Array[String]:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return ["• edit_script (bad path: %s)" % str(checked.get("error", "bad path"))]
+	var res_path: String = checked["path"]
+	var find := str(args.get("find", ""))
+	var replace := str(args.get("replace", ""))
+	if find.is_empty():
+		return ["• edit_script %s\n  ⚠ find text is empty" % res_path]
+	if find == replace:
+		return ["• edit_script %s\n  (no change: find and replace are identical)" % res_path]
+	var source := ""
+	var planned_note := ""
+	if FileAccess.file_exists(res_path):
+		var buf := _open_buffer_for(res_path)
+		source = str(buf.get("text", "")) if bool(buf.get("open", false)) else FileAccess.get_file_as_string(res_path)
+	elif planned_creates.has(res_path):
+		source = str(planned_creates[res_path])
+		planned_note = " (against planned new file)"
+	else:
+		return ["• edit_script %s\n  ⚠ does not exist (use create_script first)" % res_path]
+	var hits := source.count(find)
+	if hits == 0:
+		return ["• edit_script %s\n  ⚠ find text not found in file%s" % [res_path, planned_note]]
+	if hits > 1:
+		return ["• edit_script %s\n  ⚠ find text matches %d blocks — include more surrounding lines" % [res_path, hits]]
+	var pos := source.find(find)
+	var aligned := (pos == 0 or source[pos - 1] == "\n") \
+		and (pos + find.length() >= source.length() or source[pos + find.length()] == "\n")
+	var out: Array[String] = ["• edit_script %s%s" % [res_path, planned_note]]
+	var find_lines := find.split("\n")
+	var replace_lines := replace.split("\n")
+	if find_lines.size() > 0 and find_lines[find_lines.size() - 1].is_empty() and find.ends_with("\n"):
+		find_lines.remove_at(find_lines.size() - 1)
+	if replace.is_empty():
+		replace_lines = PackedStringArray(["(delete — replace with nothing)"])
+	elif replace_lines.size() > 0 and replace_lines[replace_lines.size() - 1].is_empty() and replace.ends_with("\n"):
+		replace_lines.remove_at(replace_lines.size() - 1)
+	if not aligned:
+		out.append("  @@ line %d (partial-line match: %d line(s) → %d)" % [source.count("\n", 0, pos) + 1, find_lines.size(), replace_lines.size()])
+		_append_capped_block(out, find_lines, "- ")
+		_append_capped_block(out, replace_lines, "+ ")
+		return out
+	var start_line := source.count("\n", 0, pos) + 1
+	out.append("  @@ line %d (replace %d line(s) with %d)%s" % [start_line, find_lines.size(), replace_lines.size(), planned_note])
+	var all_lines := source.split("\n")
+	var first_idx := start_line - 1
+	var from_idx := maxi(0, first_idx - 3)
+	var to_idx := mini(all_lines.size(), first_idx + find_lines.size() + 3)
+	var shown := 0
+	for i in range(from_idx, first_idx):
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  " + _preview_clip(all_lines[i]))
+		shown += 1
+	for ln in find_lines:
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  - " + _preview_clip(ln))
+		shown += 1
+	for ln in replace_lines:
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  + " + _preview_clip(ln))
+		shown += 1
+	for i in range(first_idx + find_lines.size(), to_idx):
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  " + _preview_clip(all_lines[i]))
+		shown += 1
+	if shown >= SCRIPT_PREVIEW_LINES:
+		out.append("  … (preview truncated)")
+	return out
+
+
+# Appends up to the preview cap with a prefix; stops silently when full.
+static func _append_capped_block(out: Array[String], block_lines: PackedStringArray, prefix: String) -> void:
+	var used := 0
+	for l in out:
+		if l.begins_with("  - ") or l.begins_with("  + ") or (l.begins_with("  ") and not l.begins_with("  @@")):
+			used += 1
+	for ln in block_lines:
+		if used >= SCRIPT_PREVIEW_LINES:
+			out.append("  … (preview truncated)")
+			return
+		out.append("  " + prefix + _preview_clip(ln))
+		used += 1
+
+
+static func _preview_clip(ln: String) -> String:
+	var clean := ln.replace("\r", "")
+	if clean.length() > 120:
+		return clean.left(119) + "…"
+	return clean
 
 
 # Show Approve/Reject buttons under the planned-actions bubble. Only one card
