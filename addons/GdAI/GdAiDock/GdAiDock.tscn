@@ -299,8 +299,7 @@ text = "API Key"
 [node name="ApiKeyField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/APIHBoxContainer" unique_id=1854238892]
 layout_mode = 2
 size_flags_horizontal = 3
-text = ""
-placeholder_text = "Paste Model API Key, or leave empty to use MODEL_API_KEY"
+placeholder_text = "Paste Model API Key, sign in with Meta, or leave empty to use MODEL_API_KEY"
 clear_button_enabled = true
 secret = true
 

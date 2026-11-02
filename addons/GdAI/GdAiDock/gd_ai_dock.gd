@@ -71,6 +71,8 @@ var _continue_generation := -1 # user-message stamp the live Continue button bel
 var _sign_in_uri := "" # verification URL for the in-flight device flow (step 2)
 
 func _ready() -> void:
+	if Engine.is_editor_hint() and get_tree() != null and get_tree().edited_scene_root == self:
+		return # inert preview: this instance is the scene open for editing, not the live dock
 	# Tab button signals
 	chat_button.pressed.connect(_on_chat_button_pressed)
 	history_button.pressed.connect(_on_history_button_pressed)
@@ -954,6 +956,8 @@ func _setup_settings_ui() -> void:
 		push_warning("[GdAI] Settings menu export is unassigned.")
 	if api_key_field == null or endpoint_field == null or model_picker == null or loop_cap_spin == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
+	if api_key_field != null:
+		api_key_field.secret = true
 	_sync_settings_fields()
 
 
@@ -988,7 +992,10 @@ func _sync_settings_fields() -> void:
 	if client == null:
 		return
 	if api_key_field != null:
-		api_key_field.text = client.api_key
+		# Never mirror the real key into the field: with @tool running, an
+		# open scene would persist it into the .tscn on save.
+		api_key_field.text = ""
+		api_key_field.placeholder_text = "Key set (hidden) — type to replace" if not client.api_key.strip_edges().is_empty() else "Paste API key, sign in with Meta, or set MODEL_API_KEY"
 	if endpoint_field != null:
 		endpoint_field.text = client.api_url
 	if loop_cap_spin != null:
@@ -1016,10 +1023,12 @@ func _select_model(model_name: String) -> void:
 func _on_settings_saved() -> void:
 	if client == null:
 		return
-	var switching := client.meta_session and api_key_field != null \
-		and api_key_field.text.strip_edges() != client.api_key.strip_edges()
+	var typed_key := ""
 	if api_key_field != null:
-		client.api_key = api_key_field.text.strip_edges()
+		typed_key = api_key_field.text.strip_edges()
+	var switching := client.meta_session and not typed_key.is_empty() and typed_key != client.api_key.strip_edges()
+	if not typed_key.is_empty():
+		client.api_key = typed_key
 	if endpoint_field != null:
 		client.api_url = endpoint_field.text.strip_edges()
 	if model_picker != null and model_picker.selected >= 0:
@@ -1035,6 +1044,7 @@ func _on_settings_saved() -> void:
 	client.save_config()
 	client.load_config()
 	_update_session_status()
+	_sync_settings_fields()
 
 
 # Phase 4 step 1: sign-in button + session status. The nodes live in the
@@ -1070,6 +1080,8 @@ func _set_sign_in_flow_visible(v: bool) -> void:
 		sign_in_popup.visible = v
 	if sign_in_code_field != null:
 		sign_in_code_field.visible = v
+		if not v:
+			sign_in_code_field.text = ""
 	if sign_in_open_browser_button != null:
 		sign_in_open_browser_button.visible = v
 	if sign_in_cancel_button != null:
