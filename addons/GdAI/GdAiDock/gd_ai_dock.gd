@@ -27,6 +27,14 @@ extends Control
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
 
+@export_category("Sign In")
+@export var sign_in_button: Button
+@export var session_status_label: Label
+@export var sign_in_code_field: LineEdit
+@export var sign_in_open_browser_button: Button
+@export var sign_in_cancel_button: Button
+@export var sign_out_button: Button # stacked with sign_in_button; visibility swaps by session
+
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
 const BUBBLE_RATIO := 1.0
@@ -35,12 +43,26 @@ const MAX_LINES := 8
 const TREE_NODE_BUDGET := 60
 const TREE_DEPTH_BUDGET := 8
 const SELECTION_BUDGET := 8
+# Control.LayoutMode enum values (the enum itself is not exposed to scripts; verified on 4.6).
+const LAYOUT_MODE_POSITION := 0
+const LAYOUT_MODE_ANCHORS := 1
 
 var current_chat: Dictionary = {}
 var client: AiClient
 var pending_ai_message: MessageBox
 var _send_button_text := "Send"
 var _send_button_tooltip := ""
+var auto_execute := false # true = run every turn immediately (testing escape hatch); false = auto-run safe turns, gate destructive ones behind Approve/Reject
+var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base_text, message, row, buttons, history_ref, preamble, capped, generation
+const MAX_LOOP_TOOL_TURNS := 3 # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost)
+const MAX_READ_CHARS := 8000 # read_script truncation cap (chars); protects the context window from huge files
+var _loop_active := false
+var _loop_transcript: Array = [] # request-scoped assistant tool pairs + tool results; never stored in chat history
+var _loop_count := 0 # tool turns received this user message
+var _loop_generation := 0 # user-message stamp; an approval from an older generation never continues the loop
+var _continue_button = null # live Continue button, if a capped turn is resumable
+var _continue_generation := -1 # user-message stamp the live Continue button belongs to
+var _sign_in_uri := "" # verification URL for the in-flight device flow (step 2)
 
 func _ready() -> void:
 	# Tab button signals
@@ -62,7 +84,7 @@ func _ready() -> void:
 	# Set up ai client
 	client = AiClient.new()
 	add_child(client)
-	client.system_prompt = "You are a helpful assistant inside the Godot editor."
+	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. You may emit up to 3 actions per response, each fully specified; for longer tasks do the first steps and continue on the next turn. After each action I'll return its result; reply with the next actions until everything is done and verified in the results, then call finish with a short summary."
 	client.response_received.connect(_on_ai_response)
 	client.request_failed.connect(_on_ai_error)
 	client.streaming = true
@@ -72,8 +94,17 @@ func _ready() -> void:
 	# rendered as text until Phase 2 executes them.
 	client.tools = AiClient.default_tools() # Set to [] to use less tokens by not using tools
 	client.tool_calls_received.connect(_on_ai_tool_calls)
+	client.device_code_received.connect(_on_device_code_received)
+	client.sign_in_succeeded.connect(_on_sign_in_succeeded)
+	client.sign_in_failed.connect(_on_sign_in_failed)
+	client.sign_in_cancelled.connect(_on_sign_in_cancelled)
+	client.session_expired.connect(_on_session_expired)
 	client.load_config()
 	_setup_settings_ui()
+	_setup_sign_in_ui()
+	_update_session_status()
+	if client.session_is_stale():
+		client.refresh_session(true)
 
 	# Remember the send button's scene appearance so cancel mode can restore it.
 	_send_button_text = send_button.text
@@ -187,10 +218,15 @@ func _on_send_button_pressed() -> void:
 
 	# Fresh editor snapshot for this request (never stored in history).
 	client.context_prompt = _build_editor_context()
+	_loop_active = true
+	_loop_transcript = []
+	_loop_count = 0
+	_loop_generation += 1
 	pending_ai_message = add_message("Thinking...", false)
 	print("[GdAI] Sending: stream=%s tools=%d history=%d." % [client.streaming, client.tools.size(), history.size()])
 	# Refresh send visibility/disabled now that a request is about to start.
 	# client.send sets busy=true on success; update again after in case it failed fast.
+	client.tool_choice = "auto" # first turn: the model may answer or act
 	client.send(history)
 	_on_user_input_box_text_changed()
 
@@ -209,6 +245,7 @@ func _on_cancel_requested() -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Request cancelled.")
 	pending_ai_message = null
+	_end_loop()
 
 	# Keep the user's unanswered turn in history so it stays for context or retry.
 	_refresh_send_button()
@@ -235,25 +272,328 @@ func _on_ai_response(text: String) -> void:
 	pending_ai_message = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
+	_end_loop() # plain-text reply: the model is done acting
 	_on_user_input_box_text_changed()
 
 
-# Render structured actions as text until Phase 2 executes them.
+# Structured actions: safe turns auto-run (the loop continues click-free);
+# turns containing a destructive action hold on an Approve/Reject card.
 func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var lines: Array[String] = []
 	if not preamble.strip_edges().is_empty():
 		lines.append(preamble.strip_edges())
-	lines.append("Planned actions (not executed yet):")
-	for call in calls:
-		if call is Dictionary:
-			lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
+	if not all_finish:
+		lines.append("Planned actions:")
+		for call in calls:
+			if call is Dictionary:
+				lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+	if calls.is_empty():
+		_end_loop() # nothing to approve or run; the turn is over
+	var capped := false
+	if not calls.is_empty():
+		_loop_count += 1
+		capped = _loop_count > MAX_LOOP_TOOL_TURNS
+	var turn_results: Array = []
+	var needs_approval := not auto_execute and not calls.is_empty() and _turn_needs_approval(calls)
+	if not needs_approval and not calls.is_empty():
+		turn_results = execute_tool_calls(calls)
+		if all_finish:
+			for result in turn_results:
+				lines.append("✓ " + str(result.get("message", "")))
+		else:
+			lines.append("Results:")
+			for result in turn_results:
+				var mark := "✓" if bool(result.get("ok", false)) else "✗"
+				lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
+		if capped:
+			lines.append("(Loop limit reached — press Continue to go on.)")
+		if _turn_has_finish(calls) and _turn_has_real_action(calls):
+			lines.append("(The model called finish with other actions — press Continue if more work remains.)")
+	if needs_approval:
+		var scene_root := EditorInterface.get_edited_scene_root()
+		if scene_root == null:
+			lines.append("(No scene is open — open a scene and ask again to apply.)")
+			needs_approval = false
+			_end_loop() # nothing can execute or continue without a scene
+		else:
+			if str(scene_root.scene_file_path).strip_edges().is_empty():
+				lines.append("Note: this scene has never been saved — approving modifies the open scene only; nothing is auto-saved.")
+			lines.append("⏳ Awaiting approval.")
 	var rendered := "\n".join(lines)
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(rendered)
-	pending_ai_message = null
+	var history_ref = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", rendered)
+		var msgs: Array = current_chat["messages"]
+		if not msgs.is_empty() and msgs[msgs.size() - 1] is Dictionary:
+			history_ref = msgs[msgs.size() - 1]
+	if needs_approval and pending_ai_message != null and is_instance_valid(pending_ai_message):
+		_show_approval_row(calls, rendered, history_ref, preamble, capped)
+	pending_ai_message = null
 	_on_user_input_box_text_changed()
+	if not needs_approval and not calls.is_empty():
+		_after_tool_turn(preamble, calls, turn_results, capped)
+	if (capped or _turn_has_finish(calls)) and not needs_approval and not calls.is_empty() and not _loop_transcript.is_empty():
+		_show_continue_row()
+
+
+# Approval policy: a turn pauses for approval only if it contains a
+# destructive action; everything else runs (and loops) without clicks.
+static func _turn_needs_approval(calls: Array) -> bool:
+	for call in calls:
+		if call is Dictionary and _is_destructive_action(str(call.get("name", ""))):
+			return true
+	return false
+
+
+# Destructive = deleting a node. NOTE: file writes (create/edit_script) are
+# NOT undoable, unlike node deletion — add their names here to gate them
+# behind approval again.
+static func _is_destructive_action(fname: String) -> bool:
+	return fname == "delete_node"
+
+
+# Show Approve/Reject buttons under the planned-actions bubble. Only one card
+# can be pending: a newer plan supersedes (rejects) the older one.
+func _show_approval_row(calls: Array, base_text: String, history_ref, preamble: String, capped: bool) -> void:
+	_supersede_pending_approval()
+	var approve_btn := Button.new()
+	approve_btn.text = "Approve"
+	approve_btn.tooltip_text = "Apply all %d action(s) to the edited scene" % calls.size()
+	approve_btn.pressed.connect(_on_approve_pressed)
+	var reject_btn := Button.new()
+	reject_btn.text = "Reject"
+	reject_btn.tooltip_text = "Discard without changing the scene"
+	reject_btn.pressed.connect(_on_reject_pressed)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(approve_btn)
+	row.add_child(reject_btn)
+	row.add_child(spacer)
+	message_list.add_child(row)
+	_pending_approval = {
+		"calls": calls, "base_text": base_text, "message": pending_ai_message,
+		"row": row, "approve": approve_btn, "reject": reject_btn, "history_ref": history_ref,
+		"preamble": preamble, "capped": capped, "generation": _loop_generation,
+	}
+
+
+func _on_approve_pressed() -> void:
+	if _pending_approval.is_empty():
+		return
+	var pending: Dictionary = _pending_approval
+	_pending_approval = {}
+	_lock_approval_buttons(pending, true)
+	var stale := int(pending.get("generation", -1)) != _loop_generation
+	var turn_calls: Array = pending.get("calls", [])
+	var lines: Array[String] = [str(pending.get("base_text", ""))]
+	lines.append("Results:")
+	var turn_results := execute_tool_calls(turn_calls)
+	for result in turn_results:
+		var mark := "✓" if bool(result.get("ok", false)) else "✗"
+		lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
+	if stale:
+		# A newer user message started since this card appeared: apply, but
+		# never feed stale results into the new turn's loop.
+		lines.append("(Superseded by a newer request — not fed back.)")
+	elif bool(pending.get("capped", false)):
+		lines.append("(Loop limit reached — press Continue to go on.)")
+	if _turn_has_finish(turn_calls) and _turn_has_real_action(turn_calls):
+		lines.append("(The model called finish with other actions — press Continue if more work remains.)")
+	_update_pending_record(pending, "\n".join(lines))
+	_on_user_input_box_text_changed()
+	if not stale:
+		_after_tool_turn(str(pending.get("preamble", "")), turn_calls, turn_results, bool(pending.get("capped", false)))
+	if not stale and (bool(pending.get("capped", false)) or _turn_has_finish(turn_calls)) and not _loop_transcript.is_empty():
+		_show_continue_row()
+
+
+func _on_reject_pressed() -> void:
+	if _pending_approval.is_empty():
+		return
+	var pending: Dictionary = _pending_approval
+	_pending_approval = {}
+	_lock_approval_buttons(pending, false)
+	_update_pending_record(pending, str(pending.get("base_text", "")) + "\nRejected — no changes applied.")
+	_end_loop()
+	_on_user_input_box_text_changed()
+
+
+# Multi-turn tool loop: after a turn's calls execute, record the assistant
+# tool pair plus per-call results as real tool messages and re-send, so the
+# model observes outcomes and keeps going until it answers with plain text.
+func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bool) -> void:
+	if not _loop_active:
+		return
+	_append_loop_transcript(preamble, calls, results)
+	if _turn_has_finish(calls) and not _turn_has_real_action(calls) and not capped:
+		_end_loop() # pure finish within budget: clean done state
+		return
+	if _turn_has_finish(calls) or capped:
+		_pause_loop() # ambiguous ending or cap: halted, but resumable via Continue
+		return
+	_continue_loop()
+
+
+static func _turn_has_finish(calls: Array) -> bool:
+	for call in calls:
+		if call is Dictionary and str(call.get("name", "")) == "finish":
+			return true
+	return false
+
+
+static func _turn_has_real_action(calls: Array) -> bool:
+	for call in calls:
+		if call is Dictionary and str(call.get("name", "")) != "finish":
+			return true
+	return false
+
+
+func _append_loop_transcript(preamble: String, calls: Array, results: Array) -> void:
+	var tool_calls: Array = []
+	for call in calls:
+		if not call is Dictionary:
+			continue
+		tool_calls.append({
+			"id": str(call.get("id", "")),
+			"type": "function",
+			"function": {
+				"name": str(call.get("name", "")),
+				"arguments": JSON.stringify(call.get("arguments", {})),
+			},
+		})
+	if tool_calls.is_empty():
+		return
+	_loop_transcript.append({"role": "assistant", "content": preamble, "tool_calls": tool_calls})
+	var pair_count: int = mini(calls.size(), results.size())
+	for i in pair_count:
+		var call = calls[i]
+		var result = results[i]
+		if not call is Dictionary or not result is Dictionary:
+			continue
+		var payload := {"ok": bool(result.get("ok", false)), "message": str(result.get("message", ""))}
+		if result.has("detail"):
+			payload["detail"] = result["detail"]
+		_loop_transcript.append({
+			"role": "tool",
+			"tool_call_id": str(call.get("id", "")),
+			"content": JSON.stringify(payload),
+		})
+
+
+func _continue_loop() -> void:
+	if not _loop_active or client == null or client.busy:
+		return
+	if current_chat.is_empty() or not current_chat.has("messages"):
+		_end_loop()
+		return
+	var history: Array = current_chat["messages"]
+	if not history is Array:
+		_end_loop()
+		return
+	# (send_followup selects required vs stepped-down auto.)
+	client.context_prompt = _build_editor_context()
+	pending_ai_message = add_message("Thinking…", false)
+	var followup := history.duplicate()
+	followup.append_array(_loop_transcript)
+	client.send_followup(followup)
+	_on_user_input_box_text_changed()
+
+
+func _end_loop() -> void:
+	_loop_active = false
+	_loop_transcript = []
+	_loop_count = 0
+	if client != null:
+		client.tool_choice = "auto"
+
+
+# Capped halt: auto-continuation stops but the transcript is kept, so a manual
+# Continue resumes with full state. Cleared by the next send or a hard end.
+func _pause_loop() -> void:
+	_loop_active = false
+
+
+# Offer a one-shot Continue button under the capped turn's bubble. Only one
+# can be live: showing a new one retires the older.
+func _show_continue_row() -> void:
+	_retire_continue_button()
+	var btn := Button.new()
+	btn.text = "Continue"
+	btn.tooltip_text = "Resume the loop for up to %d more tool turns" % MAX_LOOP_TOOL_TURNS
+	btn.pressed.connect(_on_continue_pressed)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(btn)
+	row.add_child(spacer)
+	message_list.add_child(row)
+	_continue_button = btn
+	_continue_generation = _loop_generation
+
+
+func _retire_continue_button() -> void:
+	if _continue_button != null and is_instance_valid(_continue_button):
+		_continue_button.disabled = true
+		_continue_button.text = "Superseded"
+	_continue_button = null
+
+
+func _on_continue_pressed() -> void:
+	if _continue_button == null or not is_instance_valid(_continue_button):
+		return
+	if _continue_generation != _loop_generation:
+		_retire_continue_button()
+		return
+	if client == null or client.busy:
+		return
+	var btn = _continue_button
+	_continue_button = null
+	btn.disabled = true
+	btn.text = "Continuing…"
+	_loop_active = true
+	_loop_count = 0
+	_continue_loop()
+
+
+func _supersede_pending_approval() -> void:
+	if _pending_approval.is_empty():
+		return
+	var pending: Dictionary = _pending_approval
+	_pending_approval = {}
+	_lock_approval_buttons(pending, false)
+	_update_pending_record(pending, str(pending.get("base_text", "")) + "\nSuperseded by a newer request — treated as rejected.")
+
+
+func _lock_approval_buttons(pending: Dictionary, approved: bool) -> void:
+	var approve_btn = pending.get("approve")
+	if approve_btn != null and is_instance_valid(approve_btn):
+		approve_btn.disabled = true
+		if approved:
+			approve_btn.text = "Approved ✓"
+	var reject_btn = pending.get("reject")
+	if reject_btn != null and is_instance_valid(reject_btn):
+		reject_btn.disabled = true
+		if not approved:
+			reject_btn.text = "Rejected"
+
+
+func _update_pending_record(pending: Dictionary, full_text: String) -> void:
+	var message = pending.get("message")
+	if message != null and is_instance_valid(message):
+		message.set_message_text(full_text)
+	var history_ref = pending.get("history_ref")
+	if history_ref is Dictionary:
+		history_ref["content"] = full_text
+		if not current_chat.is_empty():
+			ChatStore.save_chat(current_chat)
 
 
 # Handle error on ai message
@@ -261,6 +601,7 @@ func _on_ai_error(message: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Error: " + message)
 	pending_ai_message = null
+	_end_loop()
 
 	# Keep the user's unanswered turn in history so it stays for context or retry.
 	_on_user_input_box_text_changed()
@@ -352,9 +693,11 @@ func _build_editor_context() -> String:
 		if extra > 0:
 			shown.append("+%d more" % extra)
 		lines.append("Selected: %s" % ", ".join(shown))
+	lines.append("Paths are relative to the scene root; use \".\" for the root itself.")
 	lines.append("Tree:")
 	var shown_count := 0
 	var truncated := false
+	var saw_container := false
 	var stack: Array = [[root, 0]]
 	while not stack.is_empty():
 		var entry: Array = stack.pop_back()
@@ -363,14 +706,27 @@ func _build_editor_context() -> String:
 		if depth > TREE_DEPTH_BUDGET or shown_count >= TREE_NODE_BUDGET:
 			truncated = true
 			continue
-		lines.append("%s%s (%s)" % ["  ".repeat(depth), node.name, node.get_class()])
+		var tag := ""
+		if node is Container:
+			tag = " [container]"
+			saw_container = true
+		lines.append("%s%s (%s)%s" % ["  ".repeat(depth), node.name, node.get_class(), tag])
 		shown_count += 1
 		var children := node.get_children()
 		for i in range(children.size() - 1, -1, -1):
 			stack.append([children[i], depth + 1])
 	if truncated:
 		lines.append("… (tree truncated to %d nodes, depth %d)" % [TREE_NODE_BUDGET, TREE_DEPTH_BUDGET])
+	if saw_container:
+		lines.append("[container] arranges its children itself: anchors/offsets are ignored — center children with size_flags_horizontal/vertical = 4 (SHRINK_CENTER).")
 	return "\n".join(lines)
+
+
+static func _find_unique_named(root: Node, node_name: String):
+	var matches := root.find_children(node_name, "", true, true)
+	if matches.size() == 1:
+		return matches[0]
+	return null
 
 
 func _scene_rel_path(root: Node, node: Node) -> String:
@@ -451,6 +807,8 @@ func _select_model(model_name: String) -> void:
 func _on_settings_saved() -> void:
 	if client == null:
 		return
+	var switching := client.meta_session and api_key_field != null \
+		and api_key_field.text.strip_edges() != client.api_key.strip_edges()
 	if api_key_field != null:
 		client.api_key = api_key_field.text.strip_edges()
 	if endpoint_field != null:
@@ -459,11 +817,815 @@ func _on_settings_saved() -> void:
 		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
 		if not picked.is_empty():
 			client.model = picked
+	if switching:
+		client.clear_session() # typed key replaces the Meta session
 	client.save_config()
 	client.load_config()
+	_update_session_status()
+
+
+# Phase 4 step 1: sign-in button + session status. The nodes live in the
+# scene tree; these exports are wired in the editor. Everything is
+# null-guarded so the dock runs before the nodes exist.
+func _setup_sign_in_ui() -> void:
+	if sign_in_button != null:
+		sign_in_button.pressed.connect(_on_sign_in_button_pressed)
+	else:
+		push_warning("[GdAI] Sign-in button export is unassigned.")
+	if session_status_label == null:
+		push_warning("[GdAI] Session status label export is unassigned.")
+	if sign_in_open_browser_button != null:
+		sign_in_open_browser_button.pressed.connect(_on_sign_in_open_browser_pressed)
+	else:
+		push_warning("[GdAI] Sign-in browser button export is unassigned.")
+	if sign_in_cancel_button != null:
+		sign_in_cancel_button.pressed.connect(_on_sign_in_cancel_pressed)
+	else:
+		push_warning("[GdAI] Sign-in cancel button export is unassigned.")
+	if sign_in_code_field == null:
+		push_warning("[GdAI] Sign-in code field export is unassigned.")
+	if sign_out_button != null:
+		sign_out_button.pressed.connect(_on_sign_out_button_pressed)
+	else:
+		push_warning("[GdAI] Sign-out button export is unassigned.")
+	_set_sign_in_flow_visible(false)
+
+
+# Flow-only nodes (code + browser + cancel) show only mid-sign-in.
+func _set_sign_in_flow_visible(v: bool) -> void:
+	if sign_in_code_field != null:
+		sign_in_code_field.visible = v
+	if sign_in_open_browser_button != null:
+		sign_in_open_browser_button.visible = v
+	if sign_in_cancel_button != null:
+		sign_in_cancel_button.visible = v
+
+
+# Step 2: start the OAuth device flow; the code arrives via signal.
+func _on_sign_in_button_pressed() -> void:
+	if client == null or client.sign_in_active:
+		return
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = true
+	if session_status_label != null:
+		session_status_label.text = "Contacting Meta sign-in…"
+	client.begin_device_sign_in()
+
+
+func _on_device_code_received(user_code: String, verification_uri: String, verification_uri_complete: String, _expires_in: int) -> void:
+	_sign_in_uri = verification_uri_complete if not verification_uri_complete.is_empty() else verification_uri
+	if sign_in_code_field != null:
+		sign_in_code_field.text = user_code
+		sign_in_code_field.editable = false
+	_set_sign_in_flow_visible(true)
+	if session_status_label != null:
+		session_status_label.text = "Enter code %s at %s (or press Open browser), then approve." % [user_code, verification_uri]
+
+
+func _on_sign_in_open_browser_pressed() -> void:
+	if not _sign_in_uri.is_empty():
+		OS.shell_open(_sign_in_uri)
+
+
+func _on_sign_in_cancel_pressed() -> void:
+	if client != null:
+		client.cancel_device_sign_in()
+
+
+func _on_sign_in_succeeded() -> void:
+	_sign_in_uri = ""
+	_update_auth_buttons()
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = false
+	if session_status_label != null:
+		session_status_label.text = "Signed in with Meta."
+
+
+func _on_sign_in_failed(message: String) -> void:
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = false
+	if session_status_label != null:
+		session_status_label.text = "Sign-in failed: %s" % message
+
+
+func _on_sign_in_cancelled() -> void:
+	_sign_in_uri = ""
+	_set_sign_in_flow_visible(false)
+	if sign_in_button != null:
+		sign_in_button.disabled = false
+	_update_session_status()
+
+
+# Step 4: one stacked button slot shows sign-in or sign-out by session.
+func _update_auth_buttons() -> void:
+	var signed_in := client != null and client.meta_session
+	if sign_in_button != null:
+		sign_in_button.visible = not signed_in
+	if sign_out_button != null:
+		sign_out_button.visible = signed_in
+
+
+func _on_sign_out_button_pressed() -> void:
+	if client == null:
+		return
+	if client.sign_in_active:
+		client.cancel_device_sign_in()
+	client.clear_session()
+	client.api_key = ""
+	client.save_config()
+	_sync_settings_fields()
+	_update_session_status()
+
+
+func _on_session_expired() -> void:
+	_update_session_status() # session already cleared; flips status + buttons
+	_on_ai_error("Meta session expired — press Sign in to sign in again.")
+
+
+# Session status from current auth state. Buttons update here too so every
+# status refresh keeps the sign-in/sign-out slot correct.
+func _update_session_status() -> void:
+	_update_auth_buttons()
+	if session_status_label == null:
+		return
+	if client == null or client.api_key.strip_edges().is_empty():
+		session_status_label.text = "Signed out — no API key configured."
+		return
+	var env_key := OS.get_environment("MODEL_API_KEY").strip_edges()
+	if client.meta_session and env_key.is_empty():
+		session_status_label.text = "Signed in with Meta."
+	elif not env_key.is_empty():
+		session_status_label.text = "Using MODEL_API_KEY from the environment (dev)."
+	else:
+		session_status_label.text = "API key loaded from editor settings."
 
 
 # Set title
+# Phase 2 execution: runs validated tool calls through the Editor API so every
+# change is a separate undoable action. Continues past failures.
+# Returns per-call {"name", "ok", "message"} dicts.
+func execute_tool_calls(calls: Array) -> Array:
+	var results: Array = []
+	for call in calls:
+		if not call is Dictionary:
+			results.append({"name": "?", "ok": false, "message": "call is not an object"})
+			continue
+		results.append(_execute_tool_call(call))
+	return results
+
+
+func _execute_tool_call(call: Dictionary) -> Dictionary:
+	var fname := str(call.get("name", ""))
+	var args = call.get("arguments", {})
+	if client == null:
+		return {"name": fname, "ok": false, "message": "client not ready"}
+	if not args is Dictionary:
+		return {"name": fname, "ok": false, "message": "arguments must be an object"}
+	# Re-validate at execution time: never trust a stale or hand-built call.
+	var problem := AiClient.validate_tool_call(client.tools, fname, args)
+	if not problem.is_empty():
+		return {"name": fname, "ok": false, "message": "invalid: " + problem}
+	var editable_problem := _check_targets_editable(fname, args)
+	if not editable_problem.is_empty():
+		return {"name": fname, "ok": false, "message": editable_problem}
+	var outcome := {"ok": false, "message": "unknown action '%s'" % fname}
+	match fname:
+		"create_node":
+			outcome = _op_create_node(args)
+		"delete_node":
+			outcome = _op_delete_node(args)
+		"rename_node":
+			outcome = _op_rename_node(args)
+		"reparent_node":
+			outcome = _op_reparent_node(args)
+		"set_property":
+			outcome = _op_set_property(args)
+		"attach_script":
+			outcome = _op_attach_script(args)
+		"set_anchors_preset":
+			outcome = _op_set_anchors_preset(args)
+		"create_script":
+			outcome = _op_create_script(args)
+		"read_script":
+			outcome = _op_read_script(args)
+		"edit_script":
+			outcome = _op_edit_script(args)
+		"finish":
+			outcome = _op_finish(args)
+	var final := {"name": fname, "ok": bool(outcome.get("ok", false)), "message": str(outcome.get("message", ""))}
+	if outcome is Dictionary and outcome.has("detail"):
+		final["detail"] = outcome["detail"] # full payload for the model's tool transcript; chat shows message only
+	return final
+
+
+# Live editor selection snapshot for undo-restore. Tree-transition ops manage
+# selection inside their UndoRedo action because the editor resolves selection
+# to scene paths on refresh: a selected node that leaves the tree errors with
+# "no path can be resolved". (Undo methods execute in registration order.)
+# Ordering rule: sel.clear first, structural ops in the middle, selection
+# restore last — selection never references a mid-flight node. remove_child
+# also nulls owner recursively (probe-verified), so every add_child pairs
+# with set_owner (saved owner, else the scene root, healing broken nodes.)
+# Exception: create-undo reseats selection BEFORE removal, since the node
+# stays orphaned — every follower must release it before it leaves the tree.
+static func _selection_snapshot() -> Array:
+	var out: Array = []
+	for sel_node in EditorInterface.get_selection().get_selected_nodes():
+		if is_instance_valid(sel_node):
+			out.append(sel_node)
+	return out
+
+
+# Per-action edit gate: locked nodes and nodes inside an uneditable instance
+# are skipped instead of modified. Returns "" when ok. Mirrors the Scene
+# dock: editability comes from each enclosing instance's Editable Children
+# flag, not from owner (instance children stay owned by their instance root
+# either way — verified headlessly against Node.is_editable_instance).
+func _check_targets_editable(fname: String, args: Dictionary) -> String:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return "" # each op reports "no scene is open" itself
+	var targets: Array[String] = []
+	match fname:
+		"create_node":
+			var parent_path := str(args.get("parent", "")).strip_edges()
+			targets.append(parent_path if not parent_path.is_empty() else ".")
+		"reparent_node":
+			targets.append(str(args.get("node", "")))
+			targets.append(str(args.get("new_parent", "")))
+		"delete_node", "rename_node", "set_property", "attach_script", "set_anchors_preset":
+			targets.append(str(args.get("node", "")))
+		_:
+			return ""
+	for target in targets:
+		var resolved := _resolve_scene_node(target)
+		if resolved["node"] == null:
+			return "" # let the op report not-found itself
+		var node: Node = resolved["node"]
+		if node.has_meta("_edit_lock_"):
+			return "skipped: '%s' is locked in the editor" % node.name
+		var locked_ancestor := _enclosing_uneditable_instance(root, node)
+		if locked_ancestor != null:
+			return "skipped: '%s' is inside uneditable instance '%s' (enable Editable Children on it)" % [node.name, locked_ancestor.name]
+	return ""
+
+
+# Nearest ancestor that roots an instance (it carries a scene_file_path)
+# whose Editable Children flag is off; null when fully editable. The walk
+# stops below the edited root, and the target itself is never examined, so
+# instance roots (local, owned nodes) stay editable like in the dock.
+static func _enclosing_uneditable_instance(root: Node, node: Node) -> Node:
+	var at := node.get_parent()
+	while at != null and root.is_ancestor_of(at):
+		if not str(at.scene_file_path).strip_edges().is_empty() and not root.is_editable_instance(at):
+			return at
+		at = at.get_parent()
+	return null
+
+
+# Resolves a scene-relative (or absolute) path to a node in the edited scene.
+# Returns {"node": Node or null, "error": String}.
+func _resolve_scene_node(path_str: String) -> Dictionary:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return {"node": null, "error": "no scene is open"}
+	var clean := path_str.strip_edges()
+	if clean.is_empty() or clean == ".":
+		return {"node": root, "error": ""}
+	var node := root.get_node_or_null(NodePath(clean))
+	if node == null and (clean == root.name or clean == root.scene_file_path.get_file().get_basename()):
+		node = root
+	if node == null and clean.find("/") == -1:
+		node = _find_unique_named(root, clean)
+	if node == null:
+		return {"node": null, "error": "node not found: '%s'" % clean}
+	if node != root and not root.is_ancestor_of(node):
+		return {"node": null, "error": "node '%s' is outside the edited scene" % clean}
+	return {"node": node, "error": ""}
+
+
+static func _sanitize_node_name(base: String) -> String:
+	return base.strip_edges().replace("/", "_").replace(":", "_")
+
+
+static func _unique_child_name(parent: Node, base: String) -> String:
+	var clean := base.strip_edges()
+	if clean.is_empty():
+		clean = "Node"
+	if not parent.has_node(clean):
+		return clean
+	var i := 2
+	while parent.has_node("%s%d" % [clean, i]):
+		i += 1
+	return "%s%d" % [clean, i]
+
+
+static func _has_property(node: Node, prop: String) -> bool:
+	for p in node.get_property_list():
+		if p is Dictionary and str(p.get("name", "")) == prop:
+			return true
+	return false
+
+
+static func _short_value(value: Variant) -> String:
+	var text := str(value)
+	if value is String:
+		text = "'%s'" % value
+	if text.length() > 48:
+		return text.left(47) + "…"
+	return text
+
+
+static func _to_float_array(value: Variant, count: int) -> Array:
+	if not value is Array or value.size() != count:
+		return []
+	var out: Array = []
+	for v in value:
+		if v is float or (v is int and not (v is bool)):
+			out.append(float(v))
+		elif v is String and (v.strip_edges().is_valid_float() or v.strip_edges().is_valid_int()):
+			out.append(float(v.strip_edges()))
+		else:
+			return []
+	return out
+
+
+# Coerces a JSON value to the type the property currently holds.
+# Returns {"value": ..., "error": ""} (error non-empty on failure).
+static func _coerce_to_like(current: Variant, value: Variant) -> Dictionary:
+	if current == null or value == null:
+		return {"value": value, "error": ""}
+	if current is bool:
+		if value is bool:
+			return {"value": value, "error": ""}
+		if value is String and value.strip_edges().to_lower() in ["true", "false"]:
+			return {"value": value.strip_edges().to_lower() == "true", "error": ""}
+		return {"value": null, "error": "must be a boolean"}
+	if current is int and not (current is bool):
+		if value is float or (value is int and not (value is bool)):
+			return {"value": int(value), "error": ""}
+		if value is String and value.strip_edges().is_valid_int():
+			return {"value": int(value.strip_edges()), "error": ""}
+		return {"value": null, "error": "must be a number"}
+	if current is float:
+		if value is float or value is int:
+			return {"value": float(value), "error": ""}
+		if value is String and (value.strip_edges().is_valid_float() or value.strip_edges().is_valid_int()):
+			return {"value": float(value.strip_edges()), "error": ""}
+		return {"value": null, "error": "must be a number"}
+	if current is String:
+		if value is String:
+			return {"value": value, "error": ""}
+		return {"value": null, "error": "must be a string"}
+	if current is Object:
+		return {"value": null, "error": "resource/object properties are not supported yet"}
+	if current is Array and value is Array:
+		return {"value": value, "error": ""}
+	if current is Dictionary and value is Dictionary:
+		return {"value": value, "error": ""}
+	var want := ""
+	var count := 0
+	if current is Vector2:
+		want = "Vector2"
+		count = 2
+	elif current is Vector2i:
+		want = "Vector2i"
+		count = 2
+	elif current is Vector3:
+		want = "Vector3"
+		count = 3
+	elif current is Vector3i:
+		want = "Vector3i"
+		count = 3
+	elif current is Vector4:
+		want = "Vector4"
+		count = 4
+	elif current is Vector4i:
+		want = "Vector4i"
+		count = 4
+	elif current is Color:
+		want = "Color"
+		count = 3
+		if value is Array and value.size() == 4:
+			count = 4
+	elif current is Rect2:
+		want = "Rect2"
+		count = 4
+	if want.is_empty():
+		return {"value": null, "error": "type %s is not supported" % type_string(typeof(current))}
+	var nums := _to_float_array(value, count)
+	if nums.is_empty():
+		return {"value": null, "error": "must be an array of %d numbers" % count}
+	match want:
+		"Vector2":
+			return {"value": Vector2(nums[0], nums[1]), "error": ""}
+		"Vector2i":
+			return {"value": Vector2i(int(nums[0]), int(nums[1])), "error": ""}
+		"Vector3":
+			return {"value": Vector3(nums[0], nums[1], nums[2]), "error": ""}
+		"Vector3i":
+			return {"value": Vector3i(int(nums[0]), int(nums[1]), int(nums[2])), "error": ""}
+		"Vector4":
+			return {"value": Vector4(nums[0], nums[1], nums[2], nums[3]), "error": ""}
+		"Vector4i":
+			return {"value": Vector4i(int(nums[0]), int(nums[1]), int(nums[2]), int(nums[3])), "error": ""}
+		"Color":
+			if count == 4:
+				return {"value": Color(nums[0], nums[1], nums[2], nums[3]), "error": ""}
+			return {"value": Color(nums[0], nums[1], nums[2]), "error": ""}
+		_:
+			return {"value": Rect2(nums[0], nums[1], nums[2], nums[3]), "error": ""}
+
+
+func _op_create_node(args: Dictionary) -> Dictionary:
+	var node_type := str(args.get("node_type", "")).strip_edges()
+	if node_type.is_empty():
+		return {"ok": false, "message": "missing node_type"}
+	if not ClassDB.class_exists(node_type) or not ClassDB.can_instantiate(node_type) or not ClassDB.is_parent_class(node_type, "Node"):
+		return {"ok": false, "message": "unknown node type '%s'" % node_type}
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return {"ok": false, "message": "no scene is open"}
+	var parent := root
+	var parent_path := str(args.get("parent", "")).strip_edges()
+	if not parent_path.is_empty() and parent_path != ".":
+		var resolved := _resolve_scene_node(parent_path)
+		if resolved["node"] == null:
+			return {"ok": false, "message": "parent %s" % str(resolved["error"])}
+		parent = resolved["node"]
+	var base := str(args.get("name", "")).strip_edges()
+	if base.is_empty():
+		base = node_type
+	var final_name := _unique_child_name(parent, _sanitize_node_name(base))
+	var node := ClassDB.instantiate(node_type) as Node
+	if node == null:
+		return {"ok": false, "message": "could not instantiate '%s'" % node_type}
+	node.name = final_name
+	var is_control := node is Control
+	var sel := EditorInterface.get_selection()
+	var sel_before := _selection_snapshot()
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Create %s" % node_type)
+	undo_redo.add_do_method(parent, "add_child", node, true)
+	undo_redo.add_do_method(node, "set_owner", root)
+	if is_control:
+		# Controls start in Anchors layout mode, matching the editor.
+		undo_redo.add_do_property(node, "layout_mode", LAYOUT_MODE_ANCHORS)
+	undo_redo.add_do_method(sel, "clear")
+	undo_redo.add_do_method(sel, "add_node", node)
+	undo_redo.add_do_reference(node)
+	# Reseat selection onto live nodes BEFORE removal so no editor view that
+	# follows selection (inspector) still references the node on tree-exit.
+	undo_redo.add_undo_method(sel, "clear")
+	for sel_node in sel_before:
+		undo_redo.add_undo_method(sel, "add_node", sel_node)
+		undo_redo.add_undo_reference(sel_node)
+	undo_redo.add_undo_method(parent, "remove_child", node)
+	undo_redo.commit_action()
+	if node.get_parent() != parent or not node.is_inside_tree():
+		return {"ok": false, "message": "create failed to apply under '%s'" % _scene_rel_path(root, parent)}
+	return {"ok": true, "message": "created %s '%s' under '%s'" % [node_type, final_name, _scene_rel_path(root, parent)]}
+
+
+func _op_delete_node(args: Dictionary) -> Dictionary:
+	var resolved := _resolve_scene_node(str(args.get("node", "")))
+	if resolved["node"] == null:
+		return {"ok": false, "message": str(resolved["error"])}
+	var node: Node = resolved["node"]
+	var root := EditorInterface.get_edited_scene_root()
+	if node == root:
+		return {"ok": false, "message": "cannot delete the scene root"}
+	var parent := node.get_parent()
+	if parent == null:
+		return {"ok": false, "message": "node has no parent"}
+	var label := "%s '%s'" % [node.get_class(), node.name]
+	var old_owner: Node = node.owner
+	var heal_owner: Node = old_owner if old_owner != null else root
+	var sub_owners: Array = []
+	for d: Node in node.find_children("*", "", true, false):
+		var downer: Node = d.owner
+		sub_owners.append([d, downer if downer != null else root])
+	var sel := EditorInterface.get_selection()
+	var sel_before := _selection_snapshot()
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Delete Node")
+	# History anchor: the manager routes the action to the history of its
+	# FIRST method's target, so lead with a scene object (leading with the
+	# global selection misroutes scene methods with "history mismatch").
+	undo_redo.add_do_method(node, "set_owner", heal_owner)
+	undo_redo.add_do_method(sel, "remove_node", node)
+	undo_redo.add_do_method(parent, "remove_child", node)
+	undo_redo.add_do_reference(node)
+	undo_redo.add_undo_method(sel, "clear")
+	undo_redo.add_undo_method(parent, "add_child", node)
+	undo_redo.add_undo_method(node, "set_owner", heal_owner)
+	for pair in sub_owners:
+		undo_redo.add_undo_method(pair[0], "set_owner", pair[1])
+		undo_redo.add_undo_reference(pair[0])
+	for sel_node in sel_before:
+		undo_redo.add_undo_method(sel, "add_node", sel_node)
+		undo_redo.add_undo_reference(sel_node)
+	undo_redo.commit_action()
+	if node.is_inside_tree() or node.get_parent() != null:
+		return {"ok": false, "message": "delete failed to apply on '%s'" % node.name}
+	return {"ok": true, "message": "deleted %s" % label}
+
+
+func _op_rename_node(args: Dictionary) -> Dictionary:
+	var resolved := _resolve_scene_node(str(args.get("node", "")))
+	if resolved["node"] == null:
+		return {"ok": false, "message": str(resolved["error"])}
+	var node: Node = resolved["node"]
+	var new_name := _sanitize_node_name(str(args.get("name", "")))
+	if new_name.is_empty():
+		return {"ok": false, "message": "new name is empty"}
+	var parent := node.get_parent()
+	if parent != null and parent.has_node(new_name) and parent.get_node(new_name) != node:
+		return {"ok": false, "message": "sibling named '%s' already exists" % new_name}
+	var old_name := node.name
+	if old_name == new_name:
+		return {"ok": true, "message": "already named '%s'" % new_name}
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Rename Node")
+	undo_redo.add_do_property(node, "name", new_name)
+	undo_redo.add_undo_property(node, "name", old_name)
+	undo_redo.commit_action()
+	return {"ok": true, "message": "renamed '%s' to '%s'" % [old_name, new_name]}
+
+
+func _op_reparent_node(args: Dictionary) -> Dictionary:
+	var resolved := _resolve_scene_node(str(args.get("node", "")))
+	if resolved["node"] == null:
+		return {"ok": false, "message": str(resolved["error"])}
+	var node: Node = resolved["node"]
+	var root := EditorInterface.get_edited_scene_root()
+	if node == root:
+		return {"ok": false, "message": "cannot reparent the scene root"}
+	var presolved := _resolve_scene_node(str(args.get("new_parent", "")))
+	if presolved["node"] == null:
+		return {"ok": false, "message": "new parent %s" % str(presolved["error"])}
+	var new_parent: Node = presolved["node"]
+	if new_parent == node or node.is_ancestor_of(new_parent):
+		return {"ok": false, "message": "cannot reparent inside itself"}
+	var old_parent := node.get_parent()
+	if old_parent == null:
+		return {"ok": false, "message": "node has no parent"}
+	if old_parent == new_parent:
+		return {"ok": true, "message": "already under '%s'" % _scene_rel_path(root, new_parent)}
+	var old_owner: Node = node.owner
+	var heal_owner: Node = old_owner if old_owner != null else root
+	var sub_owners: Array = []
+	for d: Node in node.find_children("*", "", true, false):
+		var downer: Node = d.owner
+		sub_owners.append([d, downer if downer != null else root])
+	var sel := EditorInterface.get_selection()
+	var sel_before := _selection_snapshot()
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Reparent Node")
+	# History anchor (see Delete Node): first method must target a scene
+	# object. Asserts owner pre-move; the post-add set_owner still does the
+	# real restore since remove_child nulls owner.
+	undo_redo.add_do_method(node, "set_owner", heal_owner)
+	undo_redo.add_do_method(sel, "clear")
+	undo_redo.add_do_method(old_parent, "remove_child", node)
+	undo_redo.add_do_method(new_parent, "add_child", node, true)
+	undo_redo.add_do_method(node, "set_owner", heal_owner)
+	for pair in sub_owners:
+		undo_redo.add_do_method(pair[0], "set_owner", pair[1])
+		undo_redo.add_do_reference(pair[0])
+	undo_redo.add_do_method(sel, "add_node", node)
+	undo_redo.add_do_reference(node)
+	undo_redo.add_undo_method(sel, "clear")
+	undo_redo.add_undo_method(new_parent, "remove_child", node)
+	undo_redo.add_undo_method(old_parent, "add_child", node, true)
+	undo_redo.add_undo_method(node, "set_owner", heal_owner)
+	for pair in sub_owners:
+		undo_redo.add_undo_method(pair[0], "set_owner", pair[1])
+	for sel_node in sel_before:
+		undo_redo.add_undo_method(sel, "add_node", sel_node)
+		undo_redo.add_undo_reference(sel_node)
+	undo_redo.commit_action()
+	if node.get_parent() != new_parent or not node.is_inside_tree() or node.owner == null:
+		return {"ok": false, "message": "reparent failed to apply under '%s'" % _scene_rel_path(root, new_parent)}
+	return {"ok": true, "message": "moved '%s' under '%s'" % [node.name, _scene_rel_path(root, new_parent)]}
+
+
+func _op_set_property(args: Dictionary) -> Dictionary:
+	var resolved := _resolve_scene_node(str(args.get("node", "")))
+	if resolved["node"] == null:
+		return {"ok": false, "message": str(resolved["error"])}
+	var node: Node = resolved["node"]
+	var prop := str(args.get("property", "")).strip_edges()
+	if prop.is_empty():
+		return {"ok": false, "message": "property name is empty"}
+	if not _has_property(node, prop):
+		return {"ok": false, "message": "'%s' has no property '%s'" % [node.name, prop]}
+	var coerced := _coerce_to_like(node.get(prop), args.get("value"))
+	if not str(coerced.get("error", "")).is_empty():
+		return {"ok": false, "message": "property '%s' %s" % [prop, str(coerced["error"])]}
+	var old_value = node.get(prop)
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Set %s" % prop)
+	undo_redo.add_do_property(node, prop, coerced["value"])
+	undo_redo.add_undo_property(node, prop, old_value)
+	undo_redo.commit_action()
+	return {"ok": true, "message": "set %s.%s = %s" % [node.name, prop, _short_value(coerced["value"])]}
+
+
+func _op_attach_script(args: Dictionary) -> Dictionary:
+	var resolved := _resolve_scene_node(str(args.get("node", "")))
+	if resolved["node"] == null:
+		return {"ok": false, "message": str(resolved["error"])}
+	var node: Node = resolved["node"]
+	var script_path := str(args.get("script_path", "")).strip_edges()
+	if script_path.is_empty():
+		return {"ok": false, "message": "script path is empty"}
+	if node.get_script() != null:
+		return {"ok": false, "message": "'%s' already has a script" % node.name}
+	if not ResourceLoader.exists(script_path):
+		return {"ok": false, "message": "script not found: '%s'" % script_path}
+	var script = load(script_path)
+	if not script is Script:
+		return {"ok": false, "message": "'%s' is not a script" % script_path}
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Attach Script")
+	undo_redo.add_do_method(node, "set_script", script)
+	undo_redo.add_do_reference(script)
+	undo_redo.add_undo_method(node, "set_script", null)
+	undo_redo.commit_action()
+	return {"ok": true, "message": "attached '%s' to '%s'" % [script_path, node.name]}
+
+
+static func _anchors_preset_value(preset_name: String) -> int:
+	var presets := {
+		"top_left": Control.PRESET_TOP_LEFT,
+		"top_right": Control.PRESET_TOP_RIGHT,
+		"bottom_left": Control.PRESET_BOTTOM_LEFT,
+		"bottom_right": Control.PRESET_BOTTOM_RIGHT,
+		"center_left": Control.PRESET_CENTER_LEFT,
+		"center_top": Control.PRESET_CENTER_TOP,
+		"center_right": Control.PRESET_CENTER_RIGHT,
+		"center_bottom": Control.PRESET_CENTER_BOTTOM,
+		"center": Control.PRESET_CENTER,
+		"left_wide": Control.PRESET_LEFT_WIDE,
+		"top_wide": Control.PRESET_TOP_WIDE,
+		"bottom_wide": Control.PRESET_BOTTOM_WIDE,
+		"right_wide": Control.PRESET_RIGHT_WIDE,
+		"vcenter_wide": Control.PRESET_VCENTER_WIDE,
+		"hcenter_wide": Control.PRESET_HCENTER_WIDE,
+		"full_rect": Control.PRESET_FULL_RECT,
+	}
+	return int(presets.get(preset_name.to_lower(), -1))
+
+
+static func _preset_grow_directions(preset_name: String) -> Array:
+	# Verified empirically on 4.6: grow = direction the rect extends from its
+	# anchor position on min-size overflow, so overflow always extends into
+	# the parent (fresh-control defaults END,END are the top_left case).
+	var growers := {
+		"top_left": [Control.GROW_DIRECTION_END, Control.GROW_DIRECTION_END],
+		"top_right": [Control.GROW_DIRECTION_BEGIN, Control.GROW_DIRECTION_END],
+		"bottom_left": [Control.GROW_DIRECTION_END, Control.GROW_DIRECTION_BEGIN],
+		"bottom_right": [Control.GROW_DIRECTION_BEGIN, Control.GROW_DIRECTION_BEGIN],
+		"center_left": [Control.GROW_DIRECTION_END, Control.GROW_DIRECTION_BOTH],
+		"center_top": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_END],
+		"center_right": [Control.GROW_DIRECTION_BEGIN, Control.GROW_DIRECTION_BOTH],
+		"center_bottom": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BEGIN],
+		"center": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH],
+		"left_wide": [Control.GROW_DIRECTION_END, Control.GROW_DIRECTION_BOTH],
+		"top_wide": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_END],
+		"bottom_wide": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BEGIN],
+		"right_wide": [Control.GROW_DIRECTION_BEGIN, Control.GROW_DIRECTION_BOTH],
+		"vcenter_wide": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH],
+		"hcenter_wide": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH],
+		"full_rect": [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH],
+	}
+	return growers.get(preset_name.to_lower(), [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH])
+
+
+func _op_create_script(args: Dictionary) -> Dictionary:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return {"ok": false, "message": str(checked.get("error", "bad path"))}
+	var res_path: String = checked["path"]
+	var content := str(args.get("content", ""))
+	if content.strip_edges().is_empty():
+		return {"ok": false, "message": "script content is empty"}
+	if FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "'%s' already exists (won't overwrite)" % res_path}
+	var dir_err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(res_path.get_base_dir()))
+	if dir_err != OK:
+		return {"ok": false, "message": "could not create folder '%s' (error %d)" % [res_path.get_base_dir(), dir_err]}
+	var f := FileAccess.open(res_path, FileAccess.WRITE)
+	if f == null:
+		return {"ok": false, "message": "could not write '%s' (%s)" % [res_path, error_string(FileAccess.get_open_error())]}
+	f.store_string(content)
+	var write_err := f.get_error()
+	f.close()
+	if write_err != OK:
+		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	if Engine.is_editor_hint():
+		EditorInterface.get_resource_filesystem().scan()
+	return {"ok": true, "message": "created script '%s' (%d bytes; verified on disk, not undoable)" % [res_path, content.to_utf8_buffer().size()]}
+
+
+func _op_read_script(args: Dictionary) -> Dictionary:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return {"ok": false, "message": str(checked.get("error", "bad path"))}
+	var res_path: String = checked["path"]
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "'%s' does not exist" % res_path}
+	var content := FileAccess.get_file_as_string(res_path)
+	var note := ""
+	if content.length() > MAX_READ_CHARS:
+		note = " (truncated, %d total chars)" % content.length()
+		content = content.left(MAX_READ_CHARS)
+	var line_count := 0
+	if not content.is_empty():
+		line_count = content.count("\n") + 1
+	return {"ok": true, "message": "read '%s' (%d bytes, %d lines%s; content sent to model)" % [res_path, content.to_utf8_buffer().size(), line_count, note], "detail": content}
+
+
+func _op_edit_script(args: Dictionary) -> Dictionary:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return {"ok": false, "message": str(checked.get("error", "bad path"))}
+	var res_path: String = checked["path"]
+	if not FileAccess.file_exists(res_path):
+		return {"ok": false, "message": "'%s' does not exist (use create_script first)" % res_path}
+	var edited := AiClient.apply_script_edit(FileAccess.get_file_as_string(res_path), str(args.get("find", "")), str(args.get("replace", "")))
+	if not bool(edited.get("ok", false)):
+		return {"ok": false, "message": str(edited.get("error", "edit failed"))}
+	if bool(edited.get("noop", false)):
+		return {"ok": true, "message": "no change: find and replace are identical"}
+	var f := FileAccess.open(res_path, FileAccess.WRITE)
+	if f == null:
+		return {"ok": false, "message": "could not write '%s' (%s)" % [res_path, error_string(FileAccess.get_open_error())]}
+	f.store_string(str(edited.get("content", "")))
+	var write_err := f.get_error()
+	f.close()
+	if write_err != OK:
+		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
+	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
+		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	return {"ok": true, "message": "edited '%s' (1 block replaced; verified on disk, not undoable)" % res_path}
+
+
+func _op_finish(args: Dictionary) -> Dictionary:
+	var summary := str(args.get("summary", "")).strip_edges()
+	if summary.is_empty():
+		summary = "Done."
+	return {"ok": true, "message": summary}
+
+
+func _op_set_anchors_preset(args: Dictionary) -> Dictionary:
+	var resolved := _resolve_scene_node(str(args.get("node", "")))
+	if resolved["node"] == null:
+		return {"ok": false, "message": str(resolved["error"])}
+	var node: Node = resolved["node"]
+	if not node is Control:
+		return {"ok": false, "message": "'%s' is not a Control" % node.name}
+	var preset_name := str(args.get("preset", "")).strip_edges().to_lower()
+	var preset := _anchors_preset_value(preset_name)
+	if preset < 0:
+		return {"ok": false, "message": "unknown anchors preset '%s'" % preset_name}
+	var keep_offsets := bool(args.get("keep_offsets", false))
+	var grow: Array = _preset_grow_directions(preset_name)
+	var note := ""
+	var layout_parent := node.get_parent()
+	if layout_parent != null and layout_parent is Container:
+		note = " (parent %s is a Container and overrides anchors; use size_flags instead)" % layout_parent.name
+	elif layout_parent is Control:
+		var psize: Vector2 = layout_parent.size
+		if psize.x < 1.0 or psize.y < 1.0:
+			note = " (parent '%s' is %dx%d — anchors are relative to it, so size the parent first, e.g. full_rect on the parent, then re-run)" % [layout_parent.name, int(psize.x), int(psize.y)]
+	var undo_redo := EditorInterface.get_editor_undo_redo()
+	undo_redo.create_action("Set Anchors Preset")
+	undo_redo.add_do_property(node, "layout_mode", LAYOUT_MODE_ANCHORS)
+	# Probe-verified (4.6.3): plain set_anchors_preset leaves offsets numerically,
+	# so center lands the top-left corner at parent-center and full_rect overflows
+	# the parent. set_anchors_and_offsets_preset KEEP_SIZE matches the editor
+	# Layout menu exactly (true center keeping size, true fill for full_rect).
+	if keep_offsets:
+		undo_redo.add_do_method(node, "set_anchors_preset", preset, true)
+	else:
+		undo_redo.add_do_method(node, "set_anchors_and_offsets_preset", preset, Control.PRESET_MODE_KEEP_SIZE)
+	undo_redo.add_do_property(node, "grow_horizontal", grow[0])
+	undo_redo.add_do_property(node, "grow_vertical", grow[1])
+	for prop in ["anchor_left", "anchor_top", "anchor_right", "anchor_bottom", "offset_left", "offset_top", "offset_right", "offset_bottom", "grow_horizontal", "grow_vertical", "layout_mode"]:
+		undo_redo.add_undo_property(node, prop, node.get(prop))
+	undo_redo.commit_action()
+	return {"ok": true, "message": "set anchors preset '%s' on '%s'%s" % [preset_name, node.name, note]}
+
+
 func _make_title(text: String) -> String:
 	var line := text.split("\n")[0].strip_edges()
 	return line if line.length() <= 40 else line.substr(0, 40) + "…"
@@ -471,6 +1633,11 @@ func _make_title(text: String) -> String:
 
 # Clear message list
 func _clear_message_list() -> void:
+	_continue_button = null # rows (and the button) are freed below
+	if not _pending_approval.is_empty():
+		var pending: Dictionary = _pending_approval
+		_pending_approval = {}
+		_update_pending_record(pending, str(pending.get("base_text", "")) + "\nDismissed (chat cleared) — no changes applied.")
 	for child in message_list.get_children():
 		message_list.remove_child(child)
 		child.queue_free()
@@ -480,6 +1647,7 @@ func _cancel_pending_request() -> void:
 	if client != null and client.busy:
 		client.cancel()
 	pending_ai_message = null
+	_end_loop()
 
 
 # Create a new chat
