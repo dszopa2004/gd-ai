@@ -4,17 +4,17 @@ extends Control
 @onready var options_button: Button = $CenterContainer/VBoxContainer/OptionsButton
 
 
-# Connect button signals when ready.
+# Called when the menu scene is ready. Connects button signals to their handlers.
 func _ready() -> void:
 	start_button.pressed.connect(_on_start_button_pressed)
 	options_button.pressed.connect(_on_options_button_pressed)
 
 
-# Handle Start button press.
+# Handles the Start button press. Starts the game.
 func _on_start_button_pressed() -> void:
 	print("Starting game")
 
 
-# Handle Options button press.
+# Handles the Options button press. Opens the options menu.
 func _on_options_button_pressed() -> void:
 	print("opening options")

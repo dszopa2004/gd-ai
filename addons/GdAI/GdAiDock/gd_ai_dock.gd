@@ -26,6 +26,7 @@ extends Control
 @export var api_key_field: LineEdit
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
+@export var loop_cap_spin: SpinBox
 
 @export_category("Sign In")
 @export var sign_in_button: Button
@@ -44,6 +45,7 @@ const TREE_NODE_BUDGET := 60
 const TREE_DEPTH_BUDGET := 8
 const SELECTION_BUDGET := 8
 const OPEN_SCRIPT_BUDGET := 1500 # open-script excerpt cap (chars); the model uses read_script past it
+const SCRIPT_PREVIEW_LINES := 24 # max diff/content lines shown per script call in the plan
 # Control.LayoutMode enum values (the enum itself is not exposed to scripts; verified on 4.6).
 const LAYOUT_MODE_POSITION := 0
 const LAYOUT_MODE_ANCHORS := 1
@@ -55,7 +57,9 @@ var _send_button_text := "Send"
 var _send_button_tooltip := ""
 var auto_execute := false # true = run every turn immediately (testing escape hatch); false = auto-run safe turns, gate destructive ones behind Approve/Reject
 var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base_text, message, row, buttons, history_ref, preamble, capped, generation
-const MAX_LOOP_TOOL_TURNS := 3 # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost)
+const DEFAULT_MAX_LOOP_TURNS := 3
+const SETTINGS_MAX_LOOP_TURNS := "plugins/gd_ai/max_loop_turns"
+var max_loop_turns := DEFAULT_MAX_LOOP_TURNS # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost); Settings-editable
 const MAX_READ_CHARS := 8000 # read_script truncation cap (chars); protects the context window from huge files
 var _loop_active := false
 var _loop_transcript: Array = [] # request-scoped assistant tool pairs + tool results; never stored in chat history
@@ -101,6 +105,7 @@ func _ready() -> void:
 	client.sign_in_cancelled.connect(_on_sign_in_cancelled)
 	client.session_expired.connect(_on_session_expired)
 	client.load_config()
+	max_loop_turns = _load_loop_cap()
 	_setup_settings_ui()
 	_setup_sign_in_ui()
 	_update_session_status()
@@ -286,15 +291,20 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
 	if not all_finish:
 		lines.append("Planned actions:")
+		var planned_creates := _planned_script_creates(calls)
 		for call in calls:
 			if call is Dictionary:
-				lines.append("• %s %s" % [str(call.get("name", "?")), JSON.stringify(call.get("arguments", {}))])
+				var fname := str(call.get("name", ""))
+				if fname == "create_script" or fname == "edit_script":
+					lines.append_array(_script_plan_lines(fname, call.get("arguments", {}), planned_creates))
+				else:
+					lines.append("• %s %s" % [fname, JSON.stringify(call.get("arguments", {}))])
 	if calls.is_empty():
 		_end_loop() # nothing to approve or run; the turn is over
 	var capped := false
 	if not calls.is_empty():
 		_loop_count += 1
-		capped = _loop_count > MAX_LOOP_TOOL_TURNS
+		capped = _loop_count > max_loop_turns
 	var turn_results: Array = []
 	var needs_approval := not auto_execute and not calls.is_empty() and _turn_needs_approval(calls)
 	if not needs_approval and not calls.is_empty():
@@ -340,8 +350,9 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		_show_continue_row()
 
 
-# Approval policy: a turn pauses for approval only if it contains a
-# destructive action; everything else runs (and loops) without clicks.
+# Approval policy: a turn pauses for approval when it deletes a node or
+# writes a script (disk writes are not undoable); everything else runs
+# without clicks.
 static func _turn_needs_approval(calls: Array) -> bool:
 	for call in calls:
 		if call is Dictionary and _is_destructive_action(str(call.get("name", ""))):
@@ -349,11 +360,163 @@ static func _turn_needs_approval(calls: Array) -> bool:
 	return false
 
 
-# Destructive = deleting a node. NOTE: file writes (create/edit_script) are
-# NOT undoable, unlike node deletion — add their names here to gate them
-# behind approval again.
+# Gated actions: node deletion plus script writes (Phase 5 step 3 — disk
+# writes are NOT undoable, so they preview + approve like deletes).
 static func _is_destructive_action(fname: String) -> bool:
-	return fname == "delete_node"
+	return fname in ["delete_node", "create_script", "edit_script"]
+
+
+# First pass over a turn's calls: res_path -> content for valid same-turn
+# creates, so edit previews can resolve against planned new files.
+static func _planned_script_creates(calls: Array) -> Dictionary:
+	var out := {}
+	for call in calls:
+		if not call is Dictionary or str(call.get("name", "")) != "create_script":
+			continue
+		var args = call.get("arguments", {})
+		if not args is Dictionary:
+			continue
+		var checked := AiClient.validate_script_path(str(args.get("path", "")))
+		if not bool(checked.get("ok", false)):
+			continue
+		var content := str(args.get("content", ""))
+		if content.strip_edges().is_empty():
+			continue
+		var res_path: String = checked["path"]
+		if FileAccess.file_exists(res_path) or out.has(res_path):
+			continue
+		out[res_path] = content
+	return out
+
+
+# Plan-time preview lines for script writes: compact bullet + diff (or a ⚠
+# when the call would fail). Advisory only; execution re-validates.
+static func _script_plan_lines(fname: String, args: Variant, planned_creates: Dictionary) -> Array[String]:
+	if not args is Dictionary:
+		return ["• %s (invalid arguments — execution will report the error)" % fname]
+	if fname == "create_script":
+		return _create_preview_lines(args, planned_creates)
+	return _edit_preview_lines(args, planned_creates)
+
+
+static func _create_preview_lines(args: Dictionary, planned_creates: Dictionary) -> Array[String]:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return ["• create_script (bad path: %s)" % str(checked.get("error", "bad path"))]
+	var res_path: String = checked["path"]
+	var content := str(args.get("content", ""))
+	if content.strip_edges().is_empty():
+		return ["• create_script %s\n  ⚠ script content is empty" % res_path]
+	if FileAccess.file_exists(res_path):
+		return ["• create_script %s\n  ⚠ already exists (won't overwrite)" % res_path]
+	if not planned_creates.has(res_path):
+		return ["• create_script %s\n  ⚠ duplicate create in the same turn (later one fails)" % res_path]
+	var out: Array[String] = ["• create_script %s (new file)" % res_path]
+	var all_content := content.split("\n")
+	var shown := 0
+	for ln in all_content:
+		if shown >= SCRIPT_PREVIEW_LINES:
+			out.append("  … (%d more lines)" % (all_content.size() - shown))
+			break
+		out.append("  + " + _preview_clip(ln))
+		shown += 1
+	return out
+
+
+static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -> Array[String]:
+	var checked := AiClient.validate_script_path(str(args.get("path", "")))
+	if not bool(checked.get("ok", false)):
+		return ["• edit_script (bad path: %s)" % str(checked.get("error", "bad path"))]
+	var res_path: String = checked["path"]
+	var find := str(args.get("find", ""))
+	var replace := str(args.get("replace", ""))
+	if find.is_empty():
+		return ["• edit_script %s\n  ⚠ find text is empty" % res_path]
+	if find == replace:
+		return ["• edit_script %s\n  (no change: find and replace are identical)" % res_path]
+	var source := ""
+	var planned_note := ""
+	if FileAccess.file_exists(res_path):
+		var buf := _open_buffer_for(res_path)
+		source = str(buf.get("text", "")) if bool(buf.get("open", false)) else FileAccess.get_file_as_string(res_path)
+	elif planned_creates.has(res_path):
+		source = str(planned_creates[res_path])
+		planned_note = " (against planned new file)"
+	else:
+		return ["• edit_script %s\n  ⚠ does not exist (use create_script first)" % res_path]
+	var hits := source.count(find)
+	if hits == 0:
+		return ["• edit_script %s\n  ⚠ find text not found in file%s" % [res_path, planned_note]]
+	if hits > 1:
+		return ["• edit_script %s\n  ⚠ find text matches %d blocks — include more surrounding lines" % [res_path, hits]]
+	var pos := source.find(find)
+	var aligned := (pos == 0 or source[pos - 1] == "\n") \
+		and (pos + find.length() >= source.length() or source[pos + find.length()] == "\n")
+	var out: Array[String] = ["• edit_script %s%s" % [res_path, planned_note]]
+	var find_lines := find.split("\n")
+	var replace_lines := replace.split("\n")
+	if find_lines.size() > 0 and find_lines[find_lines.size() - 1].is_empty() and find.ends_with("\n"):
+		find_lines.remove_at(find_lines.size() - 1)
+	if replace.is_empty():
+		replace_lines = PackedStringArray(["(delete — replace with nothing)"])
+	elif replace_lines.size() > 0 and replace_lines[replace_lines.size() - 1].is_empty() and replace.ends_with("\n"):
+		replace_lines.remove_at(replace_lines.size() - 1)
+	if not aligned:
+		out.append("  @@ line %d (partial-line match: %d line(s) → %d)" % [source.count("\n", 0, pos) + 1, find_lines.size(), replace_lines.size()])
+		_append_capped_block(out, find_lines, "- ")
+		_append_capped_block(out, replace_lines, "+ ")
+		return out
+	var start_line := source.count("\n", 0, pos) + 1
+	out.append("  @@ line %d (replace %d line(s) with %d)%s" % [start_line, find_lines.size(), replace_lines.size(), planned_note])
+	var all_lines := source.split("\n")
+	var first_idx := start_line - 1
+	var from_idx := maxi(0, first_idx - 3)
+	var to_idx := mini(all_lines.size(), first_idx + find_lines.size() + 3)
+	var shown := 0
+	for i in range(from_idx, first_idx):
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  " + _preview_clip(all_lines[i]))
+		shown += 1
+	for ln in find_lines:
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  - " + _preview_clip(ln))
+		shown += 1
+	for ln in replace_lines:
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  + " + _preview_clip(ln))
+		shown += 1
+	for i in range(first_idx + find_lines.size(), to_idx):
+		if shown >= SCRIPT_PREVIEW_LINES:
+			break
+		out.append("  " + _preview_clip(all_lines[i]))
+		shown += 1
+	if shown >= SCRIPT_PREVIEW_LINES:
+		out.append("  … (preview truncated)")
+	return out
+
+
+# Appends up to the preview cap with a prefix; stops silently when full.
+static func _append_capped_block(out: Array[String], block_lines: PackedStringArray, prefix: String) -> void:
+	var used := 0
+	for l in out:
+		if l.begins_with("  - ") or l.begins_with("  + ") or (l.begins_with("  ") and not l.begins_with("  @@")):
+			used += 1
+	for ln in block_lines:
+		if used >= SCRIPT_PREVIEW_LINES:
+			out.append("  … (preview truncated)")
+			return
+		out.append("  " + prefix + _preview_clip(ln))
+		used += 1
+
+
+static func _preview_clip(ln: String) -> String:
+	var clean := ln.replace("\r", "")
+	if clean.length() > 120:
+		return clean.left(119) + "…"
+	return clean
 
 
 # Show Approve/Reject buttons under the planned-actions bubble. Only one card
@@ -526,7 +689,7 @@ func _show_continue_row() -> void:
 	_retire_continue_button()
 	var btn := Button.new()
 	btn.text = "Continue"
-	btn.tooltip_text = "Resume the loop for up to %d more tool turns" % MAX_LOOP_TOOL_TURNS
+	btn.tooltip_text = "Resume the loop for up to %d more tool turns" % max_loop_turns
 	btn.pressed.connect(_on_continue_pressed)
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -788,9 +951,19 @@ func _setup_settings_ui() -> void:
 		push_warning("[GdAI] Settings save button export is unassigned.")
 	if settings_menu == null:
 		push_warning("[GdAI] Settings menu export is unassigned.")
-	if api_key_field == null or endpoint_field == null or model_picker == null:
+	if api_key_field == null or endpoint_field == null or model_picker == null or loop_cap_spin == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
 	_sync_settings_fields()
+
+
+# Loop cap persistence (dock-side setting, EditorSettings like the rest).
+static func _load_loop_cap() -> int:
+	if not Engine.is_editor_hint():
+		return DEFAULT_MAX_LOOP_TURNS
+	var settings := EditorInterface.get_editor_settings()
+	if settings != null and settings.has_setting(SETTINGS_MAX_LOOP_TURNS):
+		return maxi(1, int(settings.get_setting(SETTINGS_MAX_LOOP_TURNS)))
+	return DEFAULT_MAX_LOOP_TURNS
 
 
 # Handle settings button press
@@ -817,6 +990,8 @@ func _sync_settings_fields() -> void:
 		api_key_field.text = client.api_key
 	if endpoint_field != null:
 		endpoint_field.text = client.api_url
+	if loop_cap_spin != null:
+		loop_cap_spin.value = max_loop_turns
 	_select_model(client.model)
 
 
@@ -850,6 +1025,10 @@ func _on_settings_saved() -> void:
 		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
 		if not picked.is_empty():
 			client.model = picked
+	if loop_cap_spin != null:
+		max_loop_turns = maxi(1, int(loop_cap_spin.value))
+		if Engine.is_editor_hint():
+			EditorInterface.get_editor_settings().set_setting(SETTINGS_MAX_LOOP_TURNS, max_loop_turns)
 	if switching:
 		client.clear_session() # typed key replaces the Meta session
 	client.save_config()
@@ -1577,10 +1756,17 @@ func _op_read_script(args: Dictionary) -> Dictionary:
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' does not exist" % res_path}
 	var content := FileAccess.get_file_as_string(res_path)
-	var note := ""
+	var notes: Array[String] = []
+	var buf := _open_buffer_for(res_path)
+	if bool(buf.get("open", false)):
+		content = str(buf.get("text", ""))
+		notes.append("live buffer, unsaved changes included")
 	if content.length() > MAX_READ_CHARS:
-		note = " (truncated, %d total chars)" % content.length()
+		notes.append("truncated, %d total chars" % content.length())
 		content = content.left(MAX_READ_CHARS)
+	var note := ""
+	if not notes.is_empty():
+		note = " (%s)" % "; ".join(notes)
 	var line_count := 0
 	if not content.is_empty():
 		line_count = content.count("\n") + 1
@@ -1594,7 +1780,10 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 	var res_path: String = checked["path"]
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' does not exist (use create_script first)" % res_path}
-	var edited := AiClient.apply_script_edit(FileAccess.get_file_as_string(res_path), str(args.get("find", "")), str(args.get("replace", "")))
+	var buf := _open_buffer_for(res_path)
+	var buf_open := bool(buf.get("open", false))
+	var source_text := str(buf.get("text", "")) if buf_open else FileAccess.get_file_as_string(res_path)
+	var edited := AiClient.apply_script_edit(source_text, str(args.get("find", "")), str(args.get("replace", "")))
 	if not bool(edited.get("ok", false)):
 		return {"ok": false, "message": str(edited.get("error", "edit failed"))}
 	if bool(edited.get("noop", false)):
@@ -1610,7 +1799,8 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
 		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
 	_reload_script_in_editor(res_path, str(edited.get("content", "")))
-	return {"ok": true, "message": "edited '%s' (1 block replaced; verified on disk, not undoable)" % res_path}
+	var src_note := " from live buffer" if buf_open else ""
+	return {"ok": true, "message": "edited '%s' (1 block replaced%s; verified on disk, not undoable)" % [res_path, src_note]}
 
 
 # Best-effort refresh after a disk write, so open views show the new
@@ -1634,6 +1824,27 @@ static func _reload_script_in_editor(res_path: String, new_text: String) -> void
 		var res := ResourceLoader.load(res_path)
 		if res != null and res.has_method("reload"):
 			res.call("reload")
+
+
+# Live buffer text for res_path when it is the current Script-editor file,
+# so reads/edits see unsaved changes. Returns {"open": bool, "text": String}.
+static func _open_buffer_for(res_path: String) -> Dictionary:
+	var out := {"open": false, "text": ""}
+	if not Engine.is_editor_hint():
+		return out
+	var script_editor := EditorInterface.get_script_editor()
+	if script_editor == null:
+		return out
+	var cur: Script = script_editor.get_current_script()
+	if cur == null or cur.resource_path != res_path:
+		return out
+	var ed = script_editor.get_current_editor()
+	if ed != null and ed.has_method("get_base_editor"):
+		var base = ed.get_base_editor()
+		if base is TextEdit:
+			out["open"] = true
+			out["text"] = (base as TextEdit).text
+	return out
 
 
 func _op_finish(args: Dictionary) -> Dictionary:
