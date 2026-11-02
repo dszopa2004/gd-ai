@@ -91,16 +91,16 @@ history_list = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackg
 new_chat_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/HistoryMenu/MarginContainer/VBoxContainer/MarginContainer/NewChatButton")
 settings_menu = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu")
 settings_save_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/MarginContainer/SaveButton")
-api_key_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer/ApiKeyField")
-endpoint_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer/EndpointField")
-model_picker = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer/ModelPicker")
-loop_cap_spin = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/MaxLoopHbox/MaxLoopSpinBox")
-sign_in_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/LoginButton")
-session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/SessionStatusLabel")
-sign_in_code_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/SignIncodeLineEdit")
-sign_in_open_browser_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/OpenBrowserButton")
-sign_in_cancel_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/CancelSignInButton")
-sign_out_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/SignoutButton")
+api_key_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/APIHBoxContainer/ApiKeyField")
+endpoint_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer/EndpointField")
+model_picker = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer/ModelPicker")
+loop_cap_spin = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox/MaxLoopSpinBox")
+sign_in_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginButton")
+session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/SessionStatusLabel")
+sign_in_code_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/SignIncodeLineEdit")
+sign_in_open_browser_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/OpenBrowserButton")
+sign_in_cancel_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/CancelSignInButton")
+sign_out_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/SignoutButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -272,18 +272,23 @@ theme_override_constants/margin_bottom = 5
 [node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer" unique_id=1039437563]
 layout_mode = 2
 
-[node name="SettingsBox" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer" unique_id=1473557256]
+[node name="ScrollContainer" type="ScrollContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer" unique_id=1995279177]
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="APIHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=554938498]
+[node name="SettingsBox" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer" unique_id=1473557256]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="APIHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=554938498]
 layout_mode = 2
 
-[node name="ApiKeyLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer" unique_id=496605343]
+[node name="ApiKeyLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/APIHBoxContainer" unique_id=496605343]
 layout_mode = 2
 text = "API Key"
 
-[node name="ApiKeyField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/APIHBoxContainer" unique_id=1854238892]
+[node name="ApiKeyField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/APIHBoxContainer" unique_id=1854238892]
 layout_mode = 2
 size_flags_horizontal = 3
 text = ""
@@ -291,27 +296,28 @@ placeholder_text = "Paste Model API Key, or leave empty to use MODEL_API_KEY"
 clear_button_enabled = true
 secret = true
 
-[node name="EndpointHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1214479985]
+[node name="EndpointHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1214479985]
 layout_mode = 2
 
-[node name="EndpointLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer" unique_id=1114036378]
+[node name="EndpointLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer" unique_id=1114036378]
 layout_mode = 2
 text = "Endpoint URL"
 
-[node name="EndpointField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/EndpointHBoxContainer" unique_id=1864245712]
+[node name="EndpointField" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer" unique_id=1864245712]
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "Default: https://api.meta.ai/v1/chat/completions"
 
-[node name="ModelHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=258786140]
+[node name="ModelHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=258786140]
 layout_mode = 2
 
-[node name="ModelLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer" unique_id=1792952237]
+[node name="ModelLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer" unique_id=1792952237]
 layout_mode = 2
 text = "Model:"
 
-[node name="ModelPicker" type="OptionButton" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/ModelHBoxContainer" unique_id=500124937]
+[node name="ModelPicker" type="OptionButton" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer" unique_id=500124937]
 layout_mode = 2
+size_flags_horizontal = 3
 selected = 1
 fit_to_longest_item = false
 item_count = 4
@@ -324,49 +330,49 @@ popup/item_2/id = 2
 popup/item_3/text = "muse-spark-1.1"
 popup/item_3/id = 3
 
-[node name="MaxLoopHbox" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1547999507]
+[node name="MaxLoopHbox" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1547999507]
 layout_mode = 2
 
-[node name="MaxLoopLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/MaxLoopHbox" unique_id=571632166]
+[node name="MaxLoopLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox" unique_id=571632166]
 layout_mode = 2
 text = "Max Loops:"
 
-[node name="MaxLoopSpinBox" type="SpinBox" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox/MaxLoopHbox" unique_id=994330599]
+[node name="MaxLoopSpinBox" type="SpinBox" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox" unique_id=994330599]
 layout_mode = 2
 min_value = 1.0
 max_value = 19.0
 value = 3.0
 
-[node name="LoginButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1641213546]
+[node name="LoginButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1641213546]
 visible = false
 layout_mode = 2
 text = "Login"
 
-[node name="SignoutButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=718311561]
+[node name="SignoutButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=718311561]
 layout_mode = 2
 size_flags_horizontal = 4
 text = "Sign Out"
 
-[node name="SignIncodeLineEdit" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=583039340]
+[node name="SignIncodeLineEdit" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=583039340]
 visible = false
 layout_mode = 2
 size_flags_vertical = 4
 placeholder_text = "Sign-in Code"
 alignment = 1
 
-[node name="OpenBrowserButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=72416057]
+[node name="OpenBrowserButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=72416057]
 visible = false
 layout_mode = 2
 size_flags_horizontal = 4
 text = "Open Browser"
 
-[node name="CancelSignInButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1786512832]
+[node name="CancelSignInButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1786512832]
 visible = false
 layout_mode = 2
 size_flags_horizontal = 4
 text = "Cancel Sign-in"
 
-[node name="SessionStatusLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1180374315]
+[node name="SessionStatusLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1180374315]
 layout_mode = 2
 text = "Signed in with Meta."
 horizontal_alignment = 1
