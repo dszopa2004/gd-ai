@@ -69,7 +69,14 @@ bg_color = Color(0.29411766, 0.29411766, 0.29411766, 1)
 corner_radius_bottom_right = 5
 corner_radius_bottom_left = 5
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "loop_cap_spin", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button")]
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_yycta"]
+bg_color = Color(0.4045111, 0.40451118, 0.40451103, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "loop_cap_spin", "sign_in_popup", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -95,12 +102,13 @@ api_key_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBack
 endpoint_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer/EndpointField")
 model_picker = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer/ModelPicker")
 loop_cap_spin = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox/MaxLoopSpinBox")
-sign_in_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginButton")
-session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/SessionStatusLabel")
-sign_in_code_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/SignIncodeLineEdit")
-sign_in_open_browser_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/OpenBrowserButton")
-sign_in_cancel_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/CancelSignInButton")
-sign_out_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/SignoutButton")
+sign_in_popup = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup")
+sign_in_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer/LoginButton")
+session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer/SessionStatusLabel")
+sign_in_code_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer/SignIncodeLineEdit")
+sign_in_open_browser_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer/OpenBrowserButton")
+sign_in_cancel_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer/CancelSignInButton")
+sign_out_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer/SignoutButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -343,40 +351,24 @@ min_value = 1.0
 max_value = 19.0
 value = 3.0
 
-[node name="LoginButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1641213546]
-visible = false
+[node name="LoginContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=616828408]
 layout_mode = 2
-text = "Login"
+size_flags_vertical = 10
 
-[node name="SignoutButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=718311561]
-layout_mode = 2
-size_flags_horizontal = 4
-text = "Sign Out"
-
-[node name="SignIncodeLineEdit" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=583039340]
-visible = false
-layout_mode = 2
-size_flags_vertical = 4
-placeholder_text = "Sign-in Code"
-alignment = 1
-
-[node name="OpenBrowserButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=72416057]
-visible = false
-layout_mode = 2
-size_flags_horizontal = 4
-text = "Open Browser"
-
-[node name="CancelSignInButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1786512832]
-visible = false
-layout_mode = 2
-size_flags_horizontal = 4
-text = "Cancel Sign-in"
-
-[node name="SessionStatusLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1180374315]
+[node name="SessionStatusLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer" unique_id=1180374315]
 layout_mode = 2
 text = "Signed in with Meta."
 horizontal_alignment = 1
 autowrap_mode = 3
+
+[node name="LoginButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer" unique_id=1641213546]
+visible = false
+layout_mode = 2
+text = "Login"
+
+[node name="SignoutButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer" unique_id=718311561]
+layout_mode = 2
+text = "Sign Out"
 
 [node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer" unique_id=73023715]
 layout_mode = 2
@@ -384,3 +376,40 @@ layout_mode = 2
 [node name="SaveButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/MarginContainer" unique_id=1771290411]
 layout_mode = 2
 text = "Save"
+
+[node name="SignInPopup" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground" unique_id=424612424]
+visible = false
+custom_minimum_size = Vector2(300, 150)
+layout_mode = 2
+size_flags_horizontal = 4
+size_flags_vertical = 4
+theme_override_styles/panel = SubResource("StyleBoxFlat_yycta")
+
+[node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup" unique_id=1232017100]
+layout_mode = 2
+theme_override_constants/margin_left = 5
+theme_override_constants/margin_top = 5
+theme_override_constants/margin_right = 5
+theme_override_constants/margin_bottom = 5
+
+[node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer" unique_id=288433893]
+layout_mode = 2
+
+[node name="SignIncodeLineEdit" type="LineEdit" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer" unique_id=583039340]
+visible = false
+layout_mode = 2
+size_flags_vertical = 4
+placeholder_text = "Sign-in Code"
+alignment = 1
+
+[node name="OpenBrowserButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer" unique_id=72416057]
+visible = false
+layout_mode = 2
+size_flags_horizontal = 4
+text = "Open Browser"
+
+[node name="CancelSignInButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer" unique_id=1786512832]
+visible = false
+layout_mode = 2
+size_flags_horizontal = 4
+text = "Cancel Sign-in"

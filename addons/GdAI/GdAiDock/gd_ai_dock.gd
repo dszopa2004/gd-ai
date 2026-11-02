@@ -29,6 +29,7 @@ extends Control
 @export var loop_cap_spin: SpinBox
 
 @export_category("Sign In")
+@export var sign_in_popup : PanelContainer
 @export var sign_in_button: Button
 @export var session_status_label: Label
 @export var sign_in_code_field: LineEdit
@@ -1065,6 +1066,8 @@ func _setup_sign_in_ui() -> void:
 
 # Flow-only nodes (code + browser + cancel) show only mid-sign-in.
 func _set_sign_in_flow_visible(v: bool) -> void:
+	if sign_in_popup != null:
+		sign_in_popup.visible = v
 	if sign_in_code_field != null:
 		sign_in_code_field.visible = v
 	if sign_in_open_browser_button != null:
