@@ -1577,10 +1577,17 @@ func _op_read_script(args: Dictionary) -> Dictionary:
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' does not exist" % res_path}
 	var content := FileAccess.get_file_as_string(res_path)
-	var note := ""
+	var notes: Array[String] = []
+	var buf := _open_buffer_for(res_path)
+	if bool(buf.get("open", false)):
+		content = str(buf.get("text", ""))
+		notes.append("live buffer, unsaved changes included")
 	if content.length() > MAX_READ_CHARS:
-		note = " (truncated, %d total chars)" % content.length()
+		notes.append("truncated, %d total chars" % content.length())
 		content = content.left(MAX_READ_CHARS)
+	var note := ""
+	if not notes.is_empty():
+		note = " (%s)" % "; ".join(notes)
 	var line_count := 0
 	if not content.is_empty():
 		line_count = content.count("\n") + 1
@@ -1594,7 +1601,10 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 	var res_path: String = checked["path"]
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' does not exist (use create_script first)" % res_path}
-	var edited := AiClient.apply_script_edit(FileAccess.get_file_as_string(res_path), str(args.get("find", "")), str(args.get("replace", "")))
+	var buf := _open_buffer_for(res_path)
+	var buf_open := bool(buf.get("open", false))
+	var source_text := str(buf.get("text", "")) if buf_open else FileAccess.get_file_as_string(res_path)
+	var edited := AiClient.apply_script_edit(source_text, str(args.get("find", "")), str(args.get("replace", "")))
 	if not bool(edited.get("ok", false)):
 		return {"ok": false, "message": str(edited.get("error", "edit failed"))}
 	if bool(edited.get("noop", false)):
@@ -1610,7 +1620,8 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
 		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
 	_reload_script_in_editor(res_path, str(edited.get("content", "")))
-	return {"ok": true, "message": "edited '%s' (1 block replaced; verified on disk, not undoable)" % res_path}
+	var src_note := " from live buffer" if buf_open else ""
+	return {"ok": true, "message": "edited '%s' (1 block replaced%s; verified on disk, not undoable)" % [res_path, src_note]}
 
 
 # Best-effort refresh after a disk write, so open views show the new
@@ -1634,6 +1645,27 @@ static func _reload_script_in_editor(res_path: String, new_text: String) -> void
 		var res := ResourceLoader.load(res_path)
 		if res != null and res.has_method("reload"):
 			res.call("reload")
+
+
+# Live buffer text for res_path when it is the current Script-editor file,
+# so reads/edits see unsaved changes. Returns {"open": bool, "text": String}.
+static func _open_buffer_for(res_path: String) -> Dictionary:
+	var out := {"open": false, "text": ""}
+	if not Engine.is_editor_hint():
+		return out
+	var script_editor := EditorInterface.get_script_editor()
+	if script_editor == null:
+		return out
+	var cur: Script = script_editor.get_current_script()
+	if cur == null or cur.resource_path != res_path:
+		return out
+	var ed = script_editor.get_current_editor()
+	if ed != null and ed.has_method("get_base_editor"):
+		var base = ed.get_base_editor()
+		if base is TextEdit:
+			out["open"] = true
+			out["text"] = (base as TextEdit).text
+	return out
 
 
 func _op_finish(args: Dictionary) -> Dictionary:
