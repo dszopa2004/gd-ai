@@ -324,6 +324,7 @@ popup/item_3/text = "muse-spark-1.1"
 popup/item_3/id = 3
 
 [node name="LoginButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/SettingsBox" unique_id=1641213546]
+visible = false
 layout_mode = 2
 text = "Login"
 

@@ -43,6 +43,7 @@ const MAX_LINES := 8
 const TREE_NODE_BUDGET := 60
 const TREE_DEPTH_BUDGET := 8
 const SELECTION_BUDGET := 8
+const OPEN_SCRIPT_BUDGET := 1500 # open-script excerpt cap (chars); the model uses read_script past it
 # Control.LayoutMode enum values (the enum itself is not exposed to scripts; verified on 4.6).
 const LAYOUT_MODE_POSITION := 0
 const LAYOUT_MODE_ANCHORS := 1
@@ -719,7 +720,39 @@ func _build_editor_context() -> String:
 		lines.append("… (tree truncated to %d nodes, depth %d)" % [TREE_NODE_BUDGET, TREE_DEPTH_BUDGET])
 	if saw_container:
 		lines.append("[container] arranges its children itself: anchors/offsets are ignored — center children with size_flags_horizontal/vertical = 4 (SHRINK_CENTER).")
+	var open_script := _open_script_block()
+	if not open_script.is_empty():
+		lines.append(open_script)
 	return "\n".join(lines)
+
+
+# Current Script-editor buffer for context injection: path + live text
+# (unsaved edits included), capped. "" when no script is open.
+static func _open_script_block() -> String:
+	var script_editor := EditorInterface.get_script_editor()
+	if script_editor == null:
+		return ""
+	var sc: Script = script_editor.get_current_script()
+	if sc == null:
+		return ""
+	var text := ""
+	var ed = script_editor.get_current_editor()
+	if ed != null and ed.has_method("get_base_editor"):
+		var base = ed.get_base_editor()
+		if base is TextEdit:
+			text = (base as TextEdit).text
+	if text.is_empty() and sc.has_method("get_source_code"):
+		text = str(sc.get_source_code())
+	var path := str(sc.resource_path)
+	if path.is_empty():
+		path = "(unsaved script)"
+	var total_lines := text.split("\n").size() if not text.is_empty() else 0
+	var shown := text
+	var tail := ""
+	if shown.length() > OPEN_SCRIPT_BUDGET:
+		shown = shown.left(OPEN_SCRIPT_BUDGET)
+		tail = "\n… (truncated to %d chars; use read_script for the full file)" % OPEN_SCRIPT_BUDGET
+	return "[Open script] %s (%d lines):\n%s%s" % [path, total_lines, shown, tail]
 
 
 static func _find_unique_named(root: Node, node_name: String):
@@ -1576,7 +1609,31 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
 	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
 		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	_reload_script_in_editor(res_path, str(edited.get("content", "")))
 	return {"ok": true, "message": "edited '%s' (1 block replaced; verified on disk, not undoable)" % res_path}
+
+
+# Best-effort refresh after a disk write, so open views show the new
+# content without a restart: the live Script-editor buffer when the edited
+# file is current, the compiled resource, and a filesystem notice. Guarded.
+static func _reload_script_in_editor(res_path: String, new_text: String) -> void:
+	if Engine.is_editor_hint():
+		var script_editor := EditorInterface.get_script_editor()
+		if script_editor != null:
+			var cur: Script = script_editor.get_current_script()
+			if cur != null and cur.resource_path == res_path:
+				var ed = script_editor.get_current_editor()
+				if ed != null and ed.has_method("get_base_editor"):
+					var base = ed.get_base_editor()
+					if base is TextEdit:
+						(base as TextEdit).text = new_text
+		var fs := EditorInterface.get_resource_filesystem()
+		if fs != null and fs.has_method("update_file"):
+			fs.call("update_file", res_path)
+	if ResourceLoader.exists(res_path):
+		var res := ResourceLoader.load(res_path)
+		if res != null and res.has_method("reload"):
+			res.call("reload")
 
 
 func _op_finish(args: Dictionary) -> Dictionary:
