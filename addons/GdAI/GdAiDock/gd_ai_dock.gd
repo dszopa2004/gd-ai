@@ -26,6 +26,7 @@ extends Control
 @export var api_key_field: LineEdit
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
+@export var loop_cap_spin: SpinBox
 
 @export_category("Sign In")
 @export var sign_in_button: Button
@@ -56,7 +57,9 @@ var _send_button_text := "Send"
 var _send_button_tooltip := ""
 var auto_execute := false # true = run every turn immediately (testing escape hatch); false = auto-run safe turns, gate destructive ones behind Approve/Reject
 var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base_text, message, row, buttons, history_ref, preamble, capped, generation
-const MAX_LOOP_TOOL_TURNS := 3 # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost)
+const DEFAULT_MAX_LOOP_TURNS := 3
+const SETTINGS_MAX_LOOP_TURNS := "plugins/gd_ai/max_loop_turns"
+var max_loop_turns := DEFAULT_MAX_LOOP_TURNS # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost); Settings-editable
 const MAX_READ_CHARS := 8000 # read_script truncation cap (chars); protects the context window from huge files
 var _loop_active := false
 var _loop_transcript: Array = [] # request-scoped assistant tool pairs + tool results; never stored in chat history
@@ -102,6 +105,7 @@ func _ready() -> void:
 	client.sign_in_cancelled.connect(_on_sign_in_cancelled)
 	client.session_expired.connect(_on_session_expired)
 	client.load_config()
+	max_loop_turns = _load_loop_cap()
 	_setup_settings_ui()
 	_setup_sign_in_ui()
 	_update_session_status()
@@ -300,7 +304,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var capped := false
 	if not calls.is_empty():
 		_loop_count += 1
-		capped = _loop_count > MAX_LOOP_TOOL_TURNS
+		capped = _loop_count > max_loop_turns
 	var turn_results: Array = []
 	var needs_approval := not auto_execute and not calls.is_empty() and _turn_needs_approval(calls)
 	if not needs_approval and not calls.is_empty():
@@ -685,7 +689,7 @@ func _show_continue_row() -> void:
 	_retire_continue_button()
 	var btn := Button.new()
 	btn.text = "Continue"
-	btn.tooltip_text = "Resume the loop for up to %d more tool turns" % MAX_LOOP_TOOL_TURNS
+	btn.tooltip_text = "Resume the loop for up to %d more tool turns" % max_loop_turns
 	btn.pressed.connect(_on_continue_pressed)
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -947,9 +951,19 @@ func _setup_settings_ui() -> void:
 		push_warning("[GdAI] Settings save button export is unassigned.")
 	if settings_menu == null:
 		push_warning("[GdAI] Settings menu export is unassigned.")
-	if api_key_field == null or endpoint_field == null or model_picker == null:
+	if api_key_field == null or endpoint_field == null or model_picker == null or loop_cap_spin == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
 	_sync_settings_fields()
+
+
+# Loop cap persistence (dock-side setting, EditorSettings like the rest).
+static func _load_loop_cap() -> int:
+	if not Engine.is_editor_hint():
+		return DEFAULT_MAX_LOOP_TURNS
+	var settings := EditorInterface.get_editor_settings()
+	if settings != null and settings.has_setting(SETTINGS_MAX_LOOP_TURNS):
+		return maxi(1, int(settings.get_setting(SETTINGS_MAX_LOOP_TURNS)))
+	return DEFAULT_MAX_LOOP_TURNS
 
 
 # Handle settings button press
@@ -976,6 +990,8 @@ func _sync_settings_fields() -> void:
 		api_key_field.text = client.api_key
 	if endpoint_field != null:
 		endpoint_field.text = client.api_url
+	if loop_cap_spin != null:
+		loop_cap_spin.value = max_loop_turns
 	_select_model(client.model)
 
 
@@ -1009,6 +1025,10 @@ func _on_settings_saved() -> void:
 		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
 		if not picked.is_empty():
 			client.model = picked
+	if loop_cap_spin != null:
+		max_loop_turns = maxi(1, int(loop_cap_spin.value))
+		if Engine.is_editor_hint():
+			EditorInterface.get_editor_settings().set_setting(SETTINGS_MAX_LOOP_TURNS, max_loop_turns)
 	if switching:
 		client.clear_session() # typed key replaces the Meta session
 	client.save_config()
