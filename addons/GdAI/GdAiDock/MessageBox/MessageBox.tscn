@@ -21,5 +21,6 @@ custom_minimum_size = Vector2(0, 30)
 layout_mode = 2
 focus_mode = 2
 bbcode_enabled = true
+text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat."
 fit_content = true
 selection_enabled = true
