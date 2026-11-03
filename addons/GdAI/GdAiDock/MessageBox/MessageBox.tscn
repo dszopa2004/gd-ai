@@ -1,26 +1,42 @@
 [gd_scene format=3 uid="uid://c6payojmgtnws"]
 
 [ext_resource type="Script" uid="uid://cen06nl30p5nv" path="res://addons/GdAI/GdAiDock/MessageBox/message_box.gd" id="1_744v6"]
+[ext_resource type="Texture2D" uid="uid://boli5x2ys1fd" path="res://addons/GdAI/GdAiDock/MessageBox/copy_icon.png" id="2_iia4p"]
+[ext_resource type="Texture2D" uid="uid://davq4pwpyh8nj" path="res://addons/GdAI/GdAiDock/MessageBox/copy_icon_hover.png" id="3_d5dtc"]
 
-[node name="MessageBox" type="PanelContainer" unique_id=1986103873 node_paths=PackedStringArray("label")]
+[node name="MessageBox" type="PanelContainer" unique_id=1986103873 node_paths=PackedStringArray("label", "copy_button")]
 anchors_preset = 10
 anchor_right = 1.0
 grow_horizontal = 2
 script = ExtResource("1_744v6")
-label = NodePath("MarginContainer/RichTextLabel")
+label = NodePath("VBoxContainer/MarginContainer/RichTextLabel")
+copy_button = NodePath("VBoxContainer/CopyButton")
 
-[node name="MarginContainer" type="MarginContainer" parent="." unique_id=568993262]
+[node name="VBoxContainer" type="VBoxContainer" parent="." unique_id=1100950470]
+layout_mode = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="VBoxContainer" unique_id=568993262]
 layout_mode = 2
 theme_override_constants/margin_left = 8
 theme_override_constants/margin_top = 6
 theme_override_constants/margin_right = 8
 theme_override_constants/margin_bottom = 6
 
-[node name="RichTextLabel" type="RichTextLabel" parent="MarginContainer" unique_id=1147252]
+[node name="RichTextLabel" type="RichTextLabel" parent="VBoxContainer/MarginContainer" unique_id=1147252]
 custom_minimum_size = Vector2(0, 30)
 layout_mode = 2
 focus_mode = 2
 bbcode_enabled = true
-text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat."
 fit_content = true
 selection_enabled = true
+
+[node name="CopyButton" type="TextureButton" parent="VBoxContainer" unique_id=293489584]
+visible = false
+custom_minimum_size = Vector2(32, 32)
+layout_mode = 2
+size_flags_horizontal = 0
+tooltip_text = "Copy response"
+texture_normal = ExtResource("2_iia4p")
+texture_hover = ExtResource("3_d5dtc")
+ignore_texture_size = true
+stretch_mode = 0

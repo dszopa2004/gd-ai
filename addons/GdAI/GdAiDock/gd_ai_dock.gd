@@ -275,6 +275,7 @@ func _on_cancel_requested() -> void:
 		print("[GdAI] Cleared stuck reply UI (no request was active).")
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Request cancelled.")
+		pending_ai_message.set_copy_visible(true)
 	pending_ai_message = null
 	_end_loop()
 
@@ -300,6 +301,7 @@ func _on_ai_stream(full_text: String) -> void:
 func _on_ai_response(text: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(text)
+		pending_ai_message.set_copy_visible(true)
 	pending_ai_message = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
@@ -361,6 +363,8 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var rendered := "\n".join(lines)
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(rendered)
+		if not needs_approval:
+			pending_ai_message.set_copy_visible(true) # awaiting-approval resolves later
 	var history_ref = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", rendered)
@@ -780,6 +784,7 @@ func _update_pending_record(pending: Dictionary, full_text: String) -> void:
 	var message = pending.get("message")
 	if message != null and is_instance_valid(message):
 		message.set_message_text(full_text)
+		message.set_copy_visible(true) # approve/reject/supersede are terminal
 	var history_ref = pending.get("history_ref")
 	if history_ref is Dictionary:
 		history_ref["content"] = full_text
@@ -791,6 +796,7 @@ func _update_pending_record(pending: Dictionary, full_text: String) -> void:
 func _on_ai_error(message: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Error: " + message)
+		pending_ai_message.set_copy_visible(true)
 	pending_ai_message = null
 	_end_loop()
 
@@ -799,10 +805,12 @@ func _on_ai_error(message: String) -> void:
 
 
 # Helper function to create a message box
-func add_message(text: String, is_user: bool) -> MessageBox:
+func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox:
 	var message: MessageBox = MESSAGE_BOX_SCENE.instantiate()
 	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	message.set_flat(not is_user)
+	# Copy appears only once the text is final (never for Thinking/streaming).
+	message.set_copy_visible(copy_ready and not is_user)
 	message.set_message_text(text)
 
 	if not is_user:
@@ -2126,7 +2134,8 @@ func _open_chat(id: String) -> void:
 	if messages is Array:
 		for msg in messages:
 			if msg is Dictionary:
-				add_message(str(msg.get("content", "")), str(msg.get("role", "")) == "user")
+				var is_user := str(msg.get("role", "")) == "user"
+				add_message(str(msg.get("content", "")), is_user, not is_user) # restored AI text is final
 	_on_chat_button_pressed()
 
 
