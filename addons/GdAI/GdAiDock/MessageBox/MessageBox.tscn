@@ -62,6 +62,7 @@ ignore_texture_size = true
 stretch_mode = 0
 
 [node name="UsageLabel" type="Label" parent="HBoxContainer" unique_id=1354334905]
+visible = false
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_font_sizes/font_size = 18

@@ -12,6 +12,7 @@ signal delete_requested(message: MessageBox)
 @export var usage_label: Label
 
 static var _bubble_warned := false
+static var _re_cache := {}
 
 const COPY_TOOLTIP := "Copy response"
 const DELETE_TOOLTIP := "Delete message"
@@ -124,18 +125,75 @@ static func _escape_bbcode(s: String) -> String:
 	return s.replace("[", "\\[").replace("]", "\\]")
 
 
-# Legacy single-label path: fences to BBCode (prose untouched, code escaped).
+# Legacy single-label path: fences to BBCode (prose markdown-lite, code escaped).
 static func render_markdown(text: String) -> String:
 	if not text.contains("```"):
-		return text
+		return markdown_lite(text)
 	var out: Array[String] = []
 	for part in split_markdown(text):
 		var d: Dictionary = part
 		if bool(d.get("code", false)):
 			out.append("[bgcolor=" + CODE_BG + "][code]" + _escape_bbcode(str(d.get("text", ""))) + "[/code][/bgcolor]")
 		else:
-			out.append(str(d.get("text", "")))
+			out.append(markdown_lite(str(d.get("text", ""))))
 	return "\n".join(out)
+
+
+# Markdown-lite for prose: headers, lists, links, bold, italic, inline code.
+# Single-underscore and double-underscore marks are deliberately unsupported
+# (snake_case and __dunder__ names must survive). No tables/quotes/hr (yet).
+static func markdown_lite(text: String) -> String:
+	var out: Array[String] = []
+	var block_re := _re("^([ \\t]*)(#{1,6}|[-*]|\\d+\\.)[ \\t]+(.*)$")
+	for line in text.split("\n"):
+		var m := block_re.search(line)
+		if m == null:
+			out.append(_md_inline(line))
+			continue
+		var indent: String = m.get_string(1)
+		var marker: String = m.get_string(2)
+		var content := _md_inline(m.get_string(3))
+		if marker.begins_with("#"):
+			var level := marker.length()
+			if level <= 3:
+				var size: int = [22, 19, 17][level - 1]
+				out.append("[font_size=%d][b]%s[/b][/font_size]" % [size, content])
+			else:
+				out.append("[b]%s[/b]" % content)
+		elif marker == "-" or marker == "*":
+			out.append("\t".repeat(1 + mini(indent.length() / 2, 4)) + "• " + content)
+		else:
+			out.append("\t".repeat(1 + mini(indent.length() / 2, 4)) + marker + " " + content)
+	return "\n".join(out)
+
+
+static func _md_inline(line: String) -> String:
+	# Code spans first, stashed behind private-use placeholders so their
+	# contents (and their brackets) survive the passes below untouched.
+	var mark := String.chr(0xE000)
+	var spans: Array[String] = []
+	var code_re := _re("`([^`\n]+)`")
+	var out := line
+	var m := code_re.search(out)
+	while m != null:
+		spans.append(m.get_string(1))
+		out = out.substr(0, m.get_start()) + mark + str(spans.size() - 1) + mark + out.substr(m.get_end())
+		m = code_re.search(out)
+	out = _re("\\[([^\\[\\]]+)\\]\\(([^)\\s]+)\\)").sub(out, "[url=$2]$1[/url]", true)
+	out = _re("\\*\\*\\*(.+?)\\*\\*\\*").sub(out, "[b][i]$1[/i][/b]", true)
+	out = _re("\\*\\*(.+?)\\*\\*").sub(out, "[b]$1[/b]", true)
+	out = _re("\\*([^\\*\\n]+)\\*").sub(out, "[i]$1[/i]", true)
+	for i in spans.size():
+		out = out.replace(mark + str(i) + mark, "[code]" + _escape_bbcode(spans[i]) + "[/code]")
+	return out
+
+
+static func _re(pattern: String) -> RegEx:
+	if not _re_cache.has(pattern):
+		var r := RegEx.new()
+		r.compile(pattern)
+		_re_cache[pattern] = r
+	return _re_cache[pattern]
 
 
 # Segmented path: prose labels plus real PanelContainers for code.
@@ -154,7 +212,7 @@ func _render_segments(raw: String) -> void:
 func _make_prose_label(prose: String) -> RichTextLabel:
 	var l := RichTextLabel.new()
 	l.bbcode_enabled = true
-	l.text = prose
+	l.text = markdown_lite(prose)
 	l.fit_content = true
 	l.scroll_active = false
 	l.selection_enabled = true
