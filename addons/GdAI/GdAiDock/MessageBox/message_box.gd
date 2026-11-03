@@ -16,6 +16,7 @@ const DELETE_TOOLTIP := "Delete message"
 const ACTION_MODULATE_NORMAL := Color.WHITE
 const ACTION_MODULATE_HOVER := Color(1.25, 1.25, 1.25)
 const ACTION_MODULATE_PRESSED := Color(0.75, 0.75, 0.75)
+const HOVER_SLOP_PX := 1.0 # forgiveness for landings exactly on a rect edge
 
 var _pending_text := ""
 var _copy_visible := false
@@ -49,14 +50,14 @@ func _ready() -> void:
 		delete_button.button_up.connect(_on_delete_button_up)
 	# Hover funnel: the engine notifies whichever child is under the cursor,
 	# so every hoverable part recomputes from geometry (order-independent).
-	mouse_entered.connect(_refresh_hover)
-	mouse_exited.connect(_refresh_hover)
+	mouse_entered.connect(_queue_hover_refresh)
+	mouse_exited.connect(_queue_hover_refresh)
 	if bubble != null:
-		bubble.mouse_entered.connect(_refresh_hover)
-		bubble.mouse_exited.connect(_refresh_hover)
+		bubble.mouse_entered.connect(_queue_hover_refresh)
+		bubble.mouse_exited.connect(_queue_hover_refresh)
 	if label != null:
-		label.mouse_entered.connect(_refresh_hover)
-		label.mouse_exited.connect(_refresh_hover)
+		label.mouse_entered.connect(_queue_hover_refresh)
+		label.mouse_exited.connect(_queue_hover_refresh)
 	_apply_flat() # set_flat may have run before exports resolved
 	_apply_copy_visibility()
 	_apply_delete_visibility()
@@ -137,16 +138,23 @@ func is_copy_shown() -> bool:
 
 
 # Hover truth comes from geometry, not event order: any enter/exit on any
-# part recomputes whether the mouse is over the message or its button.
+# part recomputes whether the mouse is over the message or its buttons.
+# Runs twice: immediately (same-frame probes and the common case) plus
+# deferred (mouse position can lag signal dispatch by an event).
+func _queue_hover_refresh() -> void:
+	_refresh_hover()
+	_refresh_hover.call_deferred()
+
+
 func _refresh_hover() -> void:
 	var mouse := get_global_mouse_position()
-	_hover = _covers_button(copy_button, _copy_shown, mouse) or _covers_button(delete_button, _delete_shown, mouse) or get_global_rect().has_point(mouse)
+	_hover = _covers_button(copy_button, _copy_shown, mouse) or _covers_button(delete_button, _delete_shown, mouse) or get_global_rect().grow(HOVER_SLOP_PX).has_point(mouse)
 	_apply_copy_visibility()
 	_apply_delete_visibility()
 
 
 static func _covers_button(button: BaseButton, shown: bool, mouse: Vector2) -> bool:
-	return button != null and shown and button.get_global_rect().has_point(mouse)
+	return button != null and shown and button.get_global_rect().grow(HOVER_SLOP_PX).has_point(mouse)
 
 
 func is_copy_visible() -> bool:
@@ -164,13 +172,13 @@ func _on_copy_pressed() -> void:
 func _on_copy_mouse_entered() -> void:
 	_copy_hover = true
 	_refresh_copy_modulate(false)
-	_refresh_hover()
+	_queue_hover_refresh()
 
 
 func _on_copy_mouse_exited() -> void:
 	_copy_hover = false
 	_refresh_copy_modulate(false)
-	_refresh_hover()
+	_queue_hover_refresh()
 
 
 func _on_copy_button_down() -> void:
@@ -215,13 +223,13 @@ func _on_delete_pressed() -> void:
 func _on_delete_mouse_entered() -> void:
 	_delete_hover = true
 	_refresh_delete_modulate(false)
-	_refresh_hover()
+	_queue_hover_refresh()
 
 
 func _on_delete_mouse_exited() -> void:
 	_delete_hover = false
 	_refresh_delete_modulate(false)
-	_refresh_hover()
+	_queue_hover_refresh()
 
 
 func _on_delete_button_down() -> void:
