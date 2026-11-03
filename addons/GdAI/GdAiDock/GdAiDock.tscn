@@ -83,7 +83,7 @@ corner_radius_top_right = 10
 corner_radius_bottom_right = 10
 corner_radius_bottom_left = 10
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "loop_cap_spin", "sign_in_popup", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button", "unsaved_changes_container", "save_changes_button", "exit_without_save_button")]
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "loop_cap_spin", "api_key_dirty_dot", "endpoint_dirty_dot", "model_dirty_dot", "loop_cap_dirty_dot", "sign_in_popup", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button", "unsaved_changes_container", "save_changes_button", "exit_without_save_button")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -109,6 +109,10 @@ api_key_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBack
 endpoint_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer/EndpointField")
 model_picker = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer/ModelPicker")
 loop_cap_spin = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox/MaxLoopSpinBox")
+api_key_dirty_dot = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/APIHBoxContainer/ApiKeyDirtyDot")
+endpoint_dirty_dot = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer/EndpointDirtyDot")
+model_dirty_dot = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer/ModelPickerDirtyDot")
+loop_cap_dirty_dot = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox/MaxLoopDirtyDot")
 sign_in_popup = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup")
 sign_in_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer/LoginButton")
 session_status_label = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer/SessionStatusLabel")
@@ -313,6 +317,9 @@ placeholder_text = "Paste Model API Key, sign in with Meta, or leave empty to us
 clear_button_enabled = true
 secret = true
 
+[node name="ApiKeyDirtyDot" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/APIHBoxContainer" unique_id=1685049178]
+layout_mode = 2
+
 [node name="EndpointHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1214479985]
 layout_mode = 2
 
@@ -324,6 +331,9 @@ text = "Endpoint URL"
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "Default: https://api.meta.ai/v1/chat/completions"
+
+[node name="EndpointDirtyDot" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/EndpointHBoxContainer" unique_id=541483681]
+layout_mode = 2
 
 [node name="ModelHBoxContainer" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=258786140]
 layout_mode = 2
@@ -347,6 +357,9 @@ popup/item_2/id = 2
 popup/item_3/text = "muse-spark-1.1"
 popup/item_3/id = 3
 
+[node name="ModelPickerDirtyDot" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/ModelHBoxContainer" unique_id=700671099]
+layout_mode = 2
+
 [node name="MaxLoopHbox" type="HBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=1547999507]
 layout_mode = 2
 
@@ -359,6 +372,9 @@ layout_mode = 2
 min_value = 1.0
 max_value = 19.0
 value = 3.0
+
+[node name="MaxLoopDirtyDot" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/MaxLoopHbox" unique_id=654220692]
+layout_mode = 2
 
 [node name="LoginContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox" unique_id=616828408]
 layout_mode = 2

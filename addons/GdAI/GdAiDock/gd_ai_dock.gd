@@ -28,6 +28,12 @@ extends Control
 @export var model_picker: OptionButton
 @export var loop_cap_spin: SpinBox
 
+@export_category("Settings Dirty Indicators")
+@export var api_key_dirty_dot: Label
+@export var endpoint_dirty_dot: Label
+@export var model_dirty_dot: Label
+@export var loop_cap_dirty_dot: Label
+
 @export_category("Sign In")
 @export var sign_in_popup : PanelContainer
 @export var sign_in_button: Button
@@ -55,6 +61,8 @@ const SCRIPT_PREVIEW_LINES := 24 # max diff/content lines shown per script call 
 # Control.LayoutMode enum values (the enum itself is not exposed to scripts; verified on 4.6).
 const LAYOUT_MODE_POSITION := 0
 const LAYOUT_MODE_ANCHORS := 1
+const DIRTY_DOT_TEXT := "●"
+const DIRTY_DOT_COLOR := Color(1.0, 0.75, 0.25)
 
 var current_chat: Dictionary = {}
 var client: AiClient
@@ -116,6 +124,7 @@ func _ready() -> void:
 	client.load_config()
 	max_loop_turns = _load_loop_cap()
 	_setup_settings_ui()
+	_setup_dirty_dots()
 	_setup_unsaved_popup()
 	_setup_sign_in_ui()
 	_update_session_status()
@@ -1024,6 +1033,7 @@ func _sync_settings_fields() -> void:
 	if loop_cap_spin != null:
 		loop_cap_spin.value = max_loop_turns
 	_select_model(client.model)
+	_refresh_dirty_dots()
 
 
 # Select model
@@ -1103,21 +1113,76 @@ func _confirm_leave_settings(target: String) -> bool:
 	return false
 
 
-# Dirty check by comparing fields against saved values (no signal tracking,
-# so programmatic syncs can never falsely trip it).
+# Dirty checks compare fields against saved values (no signal tracking,
+# so programmatic syncs can never falsely trip them). Split per field so
+# each setting gets its own indicator dot.
 func _settings_have_unsaved_changes() -> bool:
-	if client == null:
+	return _api_key_dirty() or _endpoint_dirty() or _model_dirty() or _loop_cap_dirty()
+
+
+func _api_key_dirty() -> bool:
+	if client == null or api_key_field == null:
 		return false
-	if api_key_field != null and not api_key_field.text.strip_edges().is_empty():
-		return true # the field is cleared on sync, so any text is unapplied
-	if endpoint_field != null and endpoint_field.text.strip_edges() != client.api_url.strip_edges():
-		return true
-	if model_picker != null and model_picker.selected >= 0:
-		if model_picker.get_item_text(model_picker.selected).strip_edges() != client.model.strip_edges():
-			return true
-	if loop_cap_spin != null and maxi(1, int(loop_cap_spin.value)) != max_loop_turns:
-		return true
-	return false
+	return not api_key_field.text.strip_edges().is_empty() # cleared on sync, so any text is unapplied
+
+
+func _endpoint_dirty() -> bool:
+	if client == null or endpoint_field == null:
+		return false
+	return endpoint_field.text.strip_edges() != client.api_url.strip_edges()
+
+
+func _model_dirty() -> bool:
+	if client == null or model_picker == null or model_picker.selected < 0:
+		return false
+	return model_picker.get_item_text(model_picker.selected).strip_edges() != client.model.strip_edges()
+
+
+func _loop_cap_dirty() -> bool:
+	if loop_cap_spin == null:
+		return false
+	return maxi(1, int(loop_cap_spin.value)) != max_loop_turns
+
+
+# Amber-dot indicators, one per setting. The Labels live in the scene tree;
+# styling is applied here so the editor side only positions empty labels.
+func _setup_dirty_dots() -> void:
+	for dot in [api_key_dirty_dot, endpoint_dirty_dot, model_dirty_dot, loop_cap_dirty_dot]:
+		_style_dot(dot)
+	if api_key_dirty_dot == null or endpoint_dirty_dot == null or model_dirty_dot == null or loop_cap_dirty_dot == null:
+		push_warning("[GdAI] One or more dirty-dot exports are unassigned.")
+	if api_key_field != null:
+		api_key_field.text_changed.connect(_refresh_dirty_dots)
+	if endpoint_field != null:
+		endpoint_field.text_changed.connect(_refresh_dirty_dots)
+	if model_picker != null:
+		model_picker.item_selected.connect(_refresh_dirty_dots)
+	if loop_cap_spin != null:
+		loop_cap_spin.value_changed.connect(_refresh_dirty_dots)
+	_refresh_dirty_dots()
+
+
+func _style_dot(dot: Label) -> void:
+	if dot == null:
+		return
+	dot.text = DIRTY_DOT_TEXT
+	dot.add_theme_color_override("font_color", DIRTY_DOT_COLOR)
+	dot.tooltip_text = "Unsaved change"
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dot.visible = false
+
+
+func _refresh_dirty_dots(_changed = null) -> void: # optional arg: field signals each pass 1
+	_set_dot(api_key_dirty_dot, _api_key_dirty())
+	_set_dot(endpoint_dirty_dot, _endpoint_dirty())
+	_set_dot(model_dirty_dot, _model_dirty())
+	_set_dot(loop_cap_dirty_dot, _loop_cap_dirty())
+
+
+func _set_dot(dot: Label, dirty: bool) -> void:
+	if dot == null:
+		return
+	dot.visible = dirty
 
 
 # Popup: same save as the Settings tab, then open the selected tab.
