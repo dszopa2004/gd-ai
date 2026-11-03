@@ -6,13 +6,12 @@
 [ext_resource type="Texture2D" uid="uid://blyjj0fgpncoe" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon.png" id="4_fo1ca"]
 [ext_resource type="Texture2D" uid="uid://3nqrrkiq72hi" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon_hover.png" id="5_o4qow"]
 
-[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("label", "copy_button", "delete_button", "bubble", "segments")]
+[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("copy_button", "delete_button", "bubble", "segments")]
 anchors_preset = 10
 anchor_right = 1.0
 offset_bottom = 78.0
 grow_horizontal = 2
 script = ExtResource("1_744v6")
-label = NodePath("Bubble/VBoxContainer/MarginContainer/Segments/RichTextLabel")
 copy_button = NodePath("HBoxContainer/CopyButton")
 delete_button = NodePath("HBoxContainer/DeleteButton")
 bubble = NodePath("Bubble")
@@ -35,15 +34,6 @@ theme_override_constants/margin_bottom = 6
 [node name="Segments" type="VBoxContainer" parent="Bubble/VBoxContainer/MarginContainer" unique_id=786592460]
 layout_mode = 2
 theme_override_constants/separation = 6
-
-[node name="RichTextLabel" type="RichTextLabel" parent="Bubble/VBoxContainer/MarginContainer/Segments" unique_id=1147252]
-custom_minimum_size = Vector2(0, 30)
-layout_mode = 2
-focus_mode = 2
-mouse_filter = 1
-bbcode_enabled = true
-fit_content = true
-selection_enabled = true
 
 [node name="HBoxContainer" type="HBoxContainer" parent="." unique_id=1709471454]
 layout_mode = 2

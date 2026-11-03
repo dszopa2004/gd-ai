@@ -38,9 +38,14 @@ var _mono_font: Font = null
 
 func _ready() -> void:
 	if segments != null:
-		_render_segments(_pending_text)
 		if label != null:
-			label.visible = false # superseded; safe to delete from the scene
+			if label.get_parent() == segments:
+				segments.remove_child(label)
+				label.queue_free()
+			else:
+				label.visible = false
+			label = null # legacy path retired; never dangles
+		_render_segments(_pending_text)
 	elif label != null:
 		label.text = render_markdown(_pending_text)
 	if bubble == null and get_class() != "PanelContainer" and not _bubble_warned:
@@ -85,26 +90,30 @@ func set_message_text(text: String) -> void:
 		copy_button.tooltip_text = COPY_TOOLTIP
 
 
-# Split raw text into [{code: bool, text: String}] on ``` fences. Empty parts
-# are dropped; an unclosed fence (mid-stream) runs to the end; lang tags drop.
+# Split raw text into [{code: bool, text: String, lang: String}] on ```
+# fences. Empty parts are dropped; an unclosed fence (mid-stream) runs to
+# the end.
 static func split_markdown(text: String) -> Array:
 	var parts: Array = []
 	var buf: Array[String] = []
 	var in_code := false
+	var lang := ""
 	for line in text.split("\n"):
 		if line.strip_edges().begins_with("```"):
-			_flush_part(parts, buf, in_code)
+			_flush_part(parts, buf, in_code, lang)
+			if not in_code:
+				lang = line.strip_edges().substr(3).strip_edges()
 			in_code = not in_code
 		else:
 			buf.append(line)
-	_flush_part(parts, buf, in_code)
+	_flush_part(parts, buf, in_code, lang)
 	return parts
 
 
-static func _flush_part(parts: Array, buf: Array[String], was_code: bool) -> void:
+static func _flush_part(parts: Array, buf: Array[String], was_code: bool, lang: String) -> void:
 	if buf.is_empty():
 		return
-	parts.append({"code": was_code, "text": "\n".join(buf)})
+	parts.append({"code": was_code, "text": "\n".join(buf), "lang": lang if was_code else ""})
 	buf.clear()
 
 
@@ -134,7 +143,7 @@ func _render_segments(raw: String) -> void:
 	for part in split_markdown(raw):
 		var d: Dictionary = part
 		if bool(d.get("code", false)):
-			segments.add_child(_make_code_block(str(d.get("text", ""))))
+			segments.add_child(_make_code_block(str(d.get("text", "")), str(d.get("lang", ""))))
 		else:
 			segments.add_child(_make_prose_label(str(d.get("text", ""))))
 
@@ -156,7 +165,7 @@ func _make_prose_label(prose: String) -> RichTextLabel:
 	return l
 
 
-func _make_code_block(code_text: String) -> PanelContainer:
+func _make_code_block(code_text: String, lang: String) -> PanelContainer:
 	var panel := PanelContainer.new()
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = CODE_BG_COLOR
@@ -170,6 +179,20 @@ func _make_code_block(code_text: String) -> PanelContainer:
 	margin.add_theme_constant_override("margin_top", 8)
 	margin.add_theme_constant_override("margin_right", 10)
 	margin.add_theme_constant_override("margin_bottom", 8)
+	var vbox := VBoxContainer.new()
+	var header := HBoxContainer.new()
+	if not lang.is_empty():
+		var lang_label := Label.new()
+		lang_label.text = lang
+		lang_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.62))
+		lang_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		header.add_child(lang_label)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	header.add_child(spacer)
+	header.add_child(_make_code_copy_button(code_text))
+	vbox.add_child(header)
 	var l := RichTextLabel.new()
 	l.bbcode_enabled = false # literal code: no escaping needed
 	l.text = code_text
@@ -180,13 +203,60 @@ func _make_code_block(code_text: String) -> PanelContainer:
 	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	l.add_theme_font_override("normal_font", _mono_font_cached())
 	l.add_theme_color_override("default_color", CODE_FG_COLOR)
-	margin.add_child(l)
+	vbox.add_child(l)
+	margin.add_child(vbox)
 	panel.add_child(margin)
 	panel.mouse_entered.connect(_queue_hover_refresh)
 	panel.mouse_exited.connect(_queue_hover_refresh)
 	l.mouse_entered.connect(_queue_hover_refresh)
 	l.mouse_exited.connect(_queue_hover_refresh)
 	return panel
+
+
+const CODE_COPY_ICON_PATH := "res://addons/GdAI/GdAiDock/MessageBox/code_copy_icon.png"
+const CODE_COPY_HOVER_PATH := "res://addons/GdAI/GdAiDock/MessageBox/code_copy_icon_hover.png"
+
+
+func _make_code_copy_button(code_text: String) -> BaseButton:
+	var btn: BaseButton
+	if ResourceLoader.exists(CODE_COPY_ICON_PATH):
+		var t := TextureButton.new()
+		t.texture_normal = load(CODE_COPY_ICON_PATH) as Texture2D
+		if ResourceLoader.exists(CODE_COPY_HOVER_PATH):
+			t.texture_hover = load(CODE_COPY_HOVER_PATH) as Texture2D
+		t.ignore_texture_size = true
+		t.stretch_mode = TextureButton.STRETCH_KEEP_ASPECT_CENTERED
+		t.custom_minimum_size = Vector2(32, 32)
+		btn = t
+	else:
+		var b := Button.new()
+		b.text = "Copy"
+		btn = b
+	btn.tooltip_text = "Copy code"
+	btn.pressed.connect(_on_code_copy_pressed.bind(code_text, btn))
+	btn.mouse_entered.connect(_on_code_copy_hover.bind(btn, true))
+	btn.mouse_exited.connect(_on_code_copy_hover.bind(btn, false))
+	btn.button_down.connect(_on_code_copy_press.bind(btn, true))
+	btn.button_up.connect(_on_code_copy_press.bind(btn, false))
+	return btn
+
+
+func _on_code_copy_pressed(code_text: String, btn: BaseButton) -> void:
+	DisplayServer.clipboard_set(code_text)
+	btn.tooltip_text = "Copied!"
+
+
+func _on_code_copy_hover(btn: BaseButton, hovering: bool) -> void:
+	btn.modulate = ACTION_MODULATE_HOVER if hovering else ACTION_MODULATE_NORMAL
+	_queue_hover_refresh()
+
+
+func _on_code_copy_press(btn: BaseButton, pressed: bool) -> void:
+	if pressed:
+		btn.modulate = ACTION_MODULATE_PRESSED
+	else:
+		var over := btn.get_global_rect().has_point(btn.get_global_mouse_position())
+		btn.modulate = ACTION_MODULATE_HOVER if over else ACTION_MODULATE_NORMAL
 
 
 func _mono_font_cached() -> Font:
