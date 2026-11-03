@@ -1169,6 +1169,29 @@ static func validate_script_path(raw_path: String) -> Dictionary:
 	return {"ok": true, "path": clean, "error": ""}
 
 
+# Attach-path gate for @-mentions: same res:// sandbox as scripts, but both
+# scripts (.gd) and scenes (.tscn) may be attached to a message.
+static func validate_attach_path(raw_path: String) -> Dictionary:
+	var clean := raw_path.strip_edges().replace("\\", "/")
+	if clean.is_empty():
+		return {"ok": false, "path": "", "error": "attach path is empty"}
+	if clean.contains("://"):
+		if not clean.begins_with("res://"):
+			return {"ok": false, "path": "", "error": "attach path must be inside res://"}
+	else:
+		if clean.begins_with("/") or clean.contains(":"):
+			return {"ok": false, "path": "", "error": "attach path must be inside res://"}
+		clean = "res://" + clean
+	if clean.contains(".."):
+		return {"ok": false, "path": "", "error": "attach path must not contain '..'"}
+	var low := clean.to_lower()
+	if not low.ends_with(".gd") and not low.ends_with(".tscn"):
+		return {"ok": false, "path": "", "error": "attach path must end with .gd or .tscn"}
+	if clean.get_file().length() <= 3:
+		return {"ok": false, "path": "", "error": "attach path has no file name"}
+	return {"ok": true, "path": clean, "error": ""}
+
+
 # Pure find/replace core for script edits. Requires exactly one match so an
 # ambiguous find can never rewrite the wrong block.
 # Returns {"ok": bool, "content": new text, "error": String, "noop": bool}.
