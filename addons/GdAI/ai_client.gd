@@ -18,6 +18,7 @@ const DEFAULT_API_URL := "https://api.meta.ai/v1/chat/completions" # verified: d
 const SETTINGS_API_KEY := "plugins/gd_ai/api_key"
 const SETTINGS_API_URL := "plugins/gd_ai/api_url"
 const SETTINGS_MODEL := "plugins/gd_ai/model"
+const SETTINGS_REASONING_EFFORT := "plugins/gd_ai/reasoning_effort"
 const SETTINGS_OAUTH_DEVICE_TOKEN := "plugins/gd_ai/oauth_device_token"
 const SETTINGS_OAUTH_REFRESH_TOKEN := "plugins/gd_ai/oauth_refresh_token"
 const SETTINGS_SESSION_MINTED_AT := "plugins/gd_ai/session_minted_at"
@@ -31,7 +32,9 @@ const DEFAULT_OAUTH_CLIENT_ID := "1031625952748946"
 
 var api_key := ""
 var model := "muse-spark-1.3-contributor"
-var reasoning_effort := "low"   # "minimal" | "low" | "medium" | "high" | "xhigh" ("none" is rejected)
+const DEFAULT_REASONING_EFFORT := "low"
+const REASONING_EFFORT_OPTIONS := ["minimal", "low", "medium", "high", "xhigh"] # closed set: "none" is rejected by the endpoint
+var reasoning_effort := DEFAULT_REASONING_EFFORT
 var system_prompt := ""         # sent as a developer message, never stored in chat history
 var max_completion_tokens := 4096 # output cap is pay-per-use; reasoning + reply + tool calls share it, so 2048 truncates multi-op responses
 var busy := false
@@ -120,11 +123,13 @@ func load_config() -> void:
 	var stored_key := ""
 	var stored_url := ""
 	var stored_model := ""
+	var stored_effort := ""
 	if Engine.is_editor_hint():
 		var settings := EditorInterface.get_editor_settings()
 		stored_key = _get_editor_setting(settings, SETTINGS_API_KEY)
 		stored_url = _get_editor_setting(settings, SETTINGS_API_URL)
 		stored_model = _get_editor_setting(settings, SETTINGS_MODEL)
+		stored_effort = _get_editor_setting(settings, SETTINGS_REASONING_EFFORT)
 		device_access_token = _get_editor_setting(settings, SETTINGS_OAUTH_DEVICE_TOKEN).strip_edges()
 		device_refresh_token = _get_editor_setting(settings, SETTINGS_OAUTH_REFRESH_TOKEN).strip_edges()
 		session_minted_at = int(_get_editor_setting(settings, SETTINGS_SESSION_MINTED_AT))
@@ -132,6 +137,12 @@ func load_config() -> void:
 	api_url = stored_url.strip_edges()
 	if not stored_model.strip_edges().is_empty():
 		model = stored_model.strip_edges()
+	if not stored_effort.strip_edges().is_empty():
+		if stored_effort.strip_edges().to_lower() in REASONING_EFFORT_OPTIONS:
+			reasoning_effort = stored_effort.strip_edges().to_lower()
+		else:
+			push_warning("[GdAI] Stored reasoning effort '%s' is invalid; using '%s'." % [stored_effort.strip_edges(), DEFAULT_REASONING_EFFORT])
+			reasoning_effort = DEFAULT_REASONING_EFFORT
 	var env_key := OS.get_environment("MODEL_API_KEY").strip_edges()
 	if not env_key.is_empty():
 		api_key = env_key
@@ -147,7 +158,7 @@ func load_config() -> void:
 	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]%s." % [model, _effective_url(), fingerprint(api_key), source, sess])
 
 
-# Persists the current key, endpoint, and model for the next session.
+# Persists the current key, endpoint, model, and reasoning effort for the next session.
 func save_config() -> void:
 	if not Engine.is_editor_hint():
 		return
@@ -155,6 +166,7 @@ func save_config() -> void:
 	settings.set_setting(SETTINGS_API_KEY, api_key.strip_edges())
 	settings.set_setting(SETTINGS_API_URL, api_url.strip_edges())
 	settings.set_setting(SETTINGS_MODEL, model.strip_edges())
+	settings.set_setting(SETTINGS_REASONING_EFFORT, reasoning_effort.strip_edges())
 
 
 # Persists the OAuth session (step 3): device + refresh tokens alongside the
@@ -163,7 +175,7 @@ func save_config() -> void:
 func save_session() -> void:
 	if not Engine.is_editor_hint():
 		return
-	save_config() # persists api_key (minted), endpoint, model
+	save_config() # persists api_key (minted), endpoint, model, effort
 	var settings := EditorInterface.get_editor_settings()
 	settings.set_setting(SETTINGS_OAUTH_DEVICE_TOKEN, device_access_token.strip_edges())
 	settings.set_setting(SETTINGS_OAUTH_REFRESH_TOKEN, device_refresh_token.strip_edges())

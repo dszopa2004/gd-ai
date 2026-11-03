@@ -26,12 +26,14 @@ extends Control
 @export var api_key_field: LineEdit
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
+@export var effort_picker: OptionButton # reasoning effort; items auto-filled from AiClient.REASONING_EFFORT_OPTIONS when empty
 @export var loop_cap_spin: SpinBox
 
 @export_category("Settings Dirty Indicators")
 @export var api_key_dirty_dot: Label
 @export var endpoint_dirty_dot: Label
 @export var model_dirty_dot: Label
+@export var effort_dirty_dot: Label
 @export var loop_cap_dirty_dot: Label
 
 @export_category("Sign In")
@@ -1395,13 +1397,16 @@ func _setup_settings_ui() -> void:
 	if model_picker != null and model_picker.item_count == 0:
 		for option in MODEL_OPTIONS:
 			model_picker.add_item(option)
+	if effort_picker != null and effort_picker.item_count == 0:
+		for option in AiClient.REASONING_EFFORT_OPTIONS:
+			effort_picker.add_item(option)
 	if settings_save_button != null:
 		settings_save_button.pressed.connect(_on_settings_saved)
 	else:
 		push_warning("[GdAI] Settings save button export is unassigned.")
 	if settings_menu == null:
 		push_warning("[GdAI] Settings menu export is unassigned.")
-	if api_key_field == null or endpoint_field == null or model_picker == null or loop_cap_spin == null:
+	if api_key_field == null or endpoint_field == null or model_picker == null or effort_picker == null or loop_cap_spin == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
 	if api_key_field != null:
 		api_key_field.secret = true
@@ -1451,6 +1456,7 @@ func _sync_settings_fields() -> void:
 	if loop_cap_spin != null:
 		loop_cap_spin.value = max_loop_turns
 	_select_model(client.model)
+	_select_effort(client.reasoning_effort)
 	_refresh_dirty_dots()
 
 
@@ -1470,6 +1476,20 @@ func _select_model(model_name: String) -> void:
 		model_picker.select(idx)
 
 
+# Select effort; closed set, so an unknown value falls back to the default
+# item instead of adding a bogus row the endpoint would reject.
+func _select_effort(effort: String) -> void:
+	if effort_picker == null:
+		return
+	var want := effort.strip_edges().to_lower()
+	if not want in AiClient.REASONING_EFFORT_OPTIONS:
+		want = AiClient.DEFAULT_REASONING_EFFORT
+	for i in effort_picker.item_count:
+		if effort_picker.get_item_text(i).strip_edges().to_lower() == want:
+			effort_picker.select(i)
+			return
+
+
 # Save settings
 func _on_settings_saved() -> void:
 	if client == null:
@@ -1486,6 +1506,10 @@ func _on_settings_saved() -> void:
 		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
 		if not picked.is_empty():
 			client.model = picked
+	if effort_picker != null and effort_picker.selected >= 0:
+		var effort := effort_picker.get_item_text(effort_picker.selected).strip_edges().to_lower()
+		if effort in AiClient.REASONING_EFFORT_OPTIONS:
+			client.reasoning_effort = effort
 	if loop_cap_spin != null:
 		max_loop_turns = maxi(1, int(loop_cap_spin.value))
 		if Engine.is_editor_hint():
@@ -1535,7 +1559,7 @@ func _confirm_leave_settings(target: String) -> bool:
 # so programmatic syncs can never falsely trip them). Split per field so
 # each setting gets its own indicator dot.
 func _settings_have_unsaved_changes() -> bool:
-	return _api_key_dirty() or _endpoint_dirty() or _model_dirty() or _loop_cap_dirty()
+	return _api_key_dirty() or _endpoint_dirty() or _model_dirty() or _effort_dirty() or _loop_cap_dirty()
 
 
 func _api_key_dirty() -> bool:
@@ -1556,6 +1580,12 @@ func _model_dirty() -> bool:
 	return model_picker.get_item_text(model_picker.selected).strip_edges() != client.model.strip_edges()
 
 
+func _effort_dirty() -> bool:
+	if client == null or effort_picker == null or effort_picker.selected < 0:
+		return false
+	return effort_picker.get_item_text(effort_picker.selected).strip_edges().to_lower() != client.reasoning_effort.strip_edges().to_lower()
+
+
 func _loop_cap_dirty() -> bool:
 	if loop_cap_spin == null:
 		return false
@@ -1565,9 +1595,9 @@ func _loop_cap_dirty() -> bool:
 # Amber-dot indicators, one per setting. The Labels live in the scene tree;
 # styling is applied here so the editor side only positions empty labels.
 func _setup_dirty_dots() -> void:
-	for dot in [api_key_dirty_dot, endpoint_dirty_dot, model_dirty_dot, loop_cap_dirty_dot]:
+	for dot in [api_key_dirty_dot, endpoint_dirty_dot, model_dirty_dot, effort_dirty_dot, loop_cap_dirty_dot]:
 		_style_dot(dot)
-	if api_key_dirty_dot == null or endpoint_dirty_dot == null or model_dirty_dot == null or loop_cap_dirty_dot == null:
+	if api_key_dirty_dot == null or endpoint_dirty_dot == null or model_dirty_dot == null or effort_dirty_dot == null or loop_cap_dirty_dot == null:
 		push_warning("[GdAI] One or more dirty-dot exports are unassigned.")
 	if api_key_field != null:
 		api_key_field.text_changed.connect(_refresh_dirty_dots)
@@ -1575,6 +1605,8 @@ func _setup_dirty_dots() -> void:
 		endpoint_field.text_changed.connect(_refresh_dirty_dots)
 	if model_picker != null:
 		model_picker.item_selected.connect(_refresh_dirty_dots)
+	if effort_picker != null:
+		effort_picker.item_selected.connect(_refresh_dirty_dots)
 	if loop_cap_spin != null:
 		loop_cap_spin.value_changed.connect(_refresh_dirty_dots)
 	_refresh_dirty_dots()
@@ -1594,6 +1626,7 @@ func _refresh_dirty_dots(_changed = null) -> void: # optional arg: field signals
 	_set_dot(api_key_dirty_dot, _api_key_dirty())
 	_set_dot(endpoint_dirty_dot, _endpoint_dirty())
 	_set_dot(model_dirty_dot, _model_dirty())
+	_set_dot(effort_dirty_dot, _effort_dirty())
 	_set_dot(loop_cap_dirty_dot, _loop_cap_dirty())
 
 
