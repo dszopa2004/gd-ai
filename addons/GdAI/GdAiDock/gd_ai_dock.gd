@@ -811,6 +811,7 @@ func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox
 	message.set_flat(not is_user)
 	# Copy appears only once the text is final (never for Thinking/streaming).
 	message.set_copy_visible(copy_ready and not is_user)
+	message.delete_requested.connect(_on_message_delete_requested)
 	message.set_message_text(text)
 
 	if not is_user:
@@ -833,6 +834,46 @@ func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox
 
 	message_list.add_child(row)
 	return message
+
+
+# Delete one bubble: drop its UI row plus its history entry (UI order matches
+# history order; both append chronologically, approval/continue rows skipped).
+func _on_message_delete_requested(message: MessageBox) -> void:
+	var idx := _message_ui_index(message)
+	var parent := message.get_parent()
+	if parent != null and parent != message_list and parent.get_parent() == message_list:
+		message_list.remove_child(parent)
+		parent.queue_free()
+	elif parent == message_list:
+		message_list.remove_child(message)
+		message.queue_free()
+	else:
+		return
+	if idx < 0 or current_chat.is_empty():
+		return
+	var messages = current_chat.get("messages", [])
+	if messages is Array and idx < messages.size():
+		messages.remove_at(idx)
+		ChatStore.save_chat(current_chat)
+
+
+func _message_ui_index(message: MessageBox) -> int:
+	var i := 0
+	for child in message_list.get_children():
+		var box: MessageBox = null
+		if child is MessageBox:
+			box = child
+		elif child is HBoxContainer:
+			for sub in child.get_children():
+				if sub is MessageBox:
+					box = sub
+					break
+		if box == null:
+			continue # approval/continue rows carry no history entry
+		if box == message:
+			return i
+		i += 1
+	return -1
 
 
 func _update_input_height() -> void:
