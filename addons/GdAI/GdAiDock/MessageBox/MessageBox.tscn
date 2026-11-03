@@ -5,8 +5,10 @@
 [ext_resource type="Texture2D" uid="uid://davq4pwpyh8nj" path="res://addons/GdAI/GdAiDock/MessageBox/copy_icon_hover.png" id="3_d5dtc"]
 [ext_resource type="Texture2D" uid="uid://blyjj0fgpncoe" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon.png" id="4_fo1ca"]
 [ext_resource type="Texture2D" uid="uid://3nqrrkiq72hi" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon_hover.png" id="5_o4qow"]
+[ext_resource type="Texture2D" uid="uid://c4lx031uovjkn" path="res://addons/GdAI/GdAiDock/MessageBox/retry_icon.png" id="6_4oiel"]
+[ext_resource type="Texture2D" uid="uid://7cka6ucdfidd" path="res://addons/GdAI/GdAiDock/MessageBox/retry_icon_hover.png" id="7_3fc2q"]
 
-[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("copy_button", "delete_button", "bubble", "segments", "usage_label")]
+[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("copy_button", "delete_button", "retry_button", "bubble", "segments", "usage_label")]
 anchors_preset = 10
 anchor_right = 1.0
 offset_bottom = 78.0
@@ -14,6 +16,7 @@ grow_horizontal = 2
 script = ExtResource("1_744v6")
 copy_button = NodePath("HBoxContainer/CopyButton")
 delete_button = NodePath("HBoxContainer/DeleteButton")
+retry_button = NodePath("HBoxContainer/RetryButton")
 bubble = NodePath("Bubble")
 segments = NodePath("Bubble/VBoxContainer/MarginContainer/Segments")
 usage_label = NodePath("HBoxContainer/UsageLabel")
@@ -58,6 +61,16 @@ tooltip_text = "Delete message"
 mouse_filter = 2
 texture_normal = ExtResource("4_fo1ca")
 texture_hover = ExtResource("5_o4qow")
+ignore_texture_size = true
+stretch_mode = 0
+
+[node name="RetryButton" type="TextureButton" parent="HBoxContainer" unique_id=1915992821]
+custom_minimum_size = Vector2(42, 42)
+layout_mode = 2
+tooltip_text = "Retry"
+mouse_filter = 2
+texture_normal = ExtResource("6_4oiel")
+texture_hover = ExtResource("7_3fc2q")
 ignore_texture_size = true
 stretch_mode = 0
 

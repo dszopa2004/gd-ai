@@ -247,6 +247,12 @@ func _on_send_button_pressed() -> void:
 	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 
+	_launch_request(history)
+
+
+# Shared send kernel: fresh editor context, fresh loop state, a pending AI
+# message, then the client call. The caller owns history + input-box handling.
+func _launch_request(history: Array) -> void:
 	# Fresh editor snapshot for this request (never stored in history).
 	client.context_prompt = _build_editor_context()
 	_loop_active = true
@@ -824,11 +830,13 @@ func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox
 	# Copy appears only once the text is final (never for Thinking/streaming).
 	message.set_copy_visible(copy_ready and not is_user)
 	message.delete_requested.connect(_on_message_delete_requested)
+	message.retry_requested.connect(_on_message_retry_requested)
 	message.set_message_text(text)
 
 	if not is_user:
 		# AI replies flow full-width with no bubble offset (room for code blocks).
 		message_list.add_child(message)
+		_update_retry_visibility()
 		return message # keep this to stream into it
 
 	# User: spacer on the left pushes the bubble right.
@@ -845,6 +853,7 @@ func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox
 	row.add_child(message)
 
 	message_list.add_child(row)
+	_update_retry_visibility()
 	return message
 
 
@@ -867,6 +876,7 @@ func _on_message_delete_requested(message: MessageBox) -> void:
 	if messages is Array and idx < messages.size():
 		messages.remove_at(idx)
 		ChatStore.save_chat(current_chat)
+	_update_retry_visibility() # a delete can move the last-AI target
 
 
 func _message_ui_index(message: MessageBox) -> int:
@@ -886,6 +896,63 @@ func _message_ui_index(message: MessageBox) -> int:
 			return i
 		i += 1
 	return -1
+
+
+# AI messages sit directly under message_list; user bubbles are wrapped in
+# HBox rows, and approval/continue rows hold no MessageBox at all.
+func _ai_messages_in_order() -> Array:
+	var boxes: Array = []
+	if message_list == null:
+		return boxes
+	for child in message_list.get_children():
+		if child is MessageBox:
+			boxes.append(child)
+	return boxes
+
+
+# Only the last AI message offers retry (mirrors the newest-turn replay rule).
+func _update_retry_visibility() -> void:
+	var boxes := _ai_messages_in_order()
+	for i in boxes.size():
+		(boxes[i] as MessageBox).set_retry_last(i == boxes.size() - 1)
+
+
+# Retry = regenerate the last response: drop its bubble + history entry, then
+# re-run the surviving newest user turn through the normal send kernel.
+func _on_message_retry_requested(message: MessageBox) -> void:
+	if client == null or client.busy or _loop_active:
+		return # mid-request (incl. between tool turns): nothing final to redo
+	if message.get_parent() != message_list:
+		return
+	if current_chat.is_empty() or not current_chat.has("messages"):
+		return
+	var history: Array = current_chat["messages"]
+	if not history is Array:
+		return
+	# The target must be the last history entry and an assistant one, preceded
+	# by its user turn; retrying an older turn (history truncation) is out of
+	# scope, so stale presses simply no-op.
+	var idx := _message_ui_index(message)
+	if idx < 1 or idx != history.size() - 1:
+		return
+	var entry = history[idx]
+	if not entry is Dictionary or str(entry.get("role", "")) != "assistant":
+		return
+	var prev = history[idx - 1]
+	if not prev is Dictionary or str(prev.get("role", "")) != "user":
+		return
+	# A retry starts a brand-new turn: any live approval/continue for the old
+	# one is retired first, exactly like a superseding send.
+	if not _pending_approval.is_empty():
+		_supersede_pending_approval()
+	_retire_continue_button()
+	history.remove_at(idx)
+	ChatStore.save_chat(current_chat)
+	pending_ai_message = null
+	message_list.remove_child(message)
+	message.queue_free()
+	_update_retry_visibility()
+	_launch_request(history) # re-inits loop state, Thinking bubble, send
 
 
 func _update_input_height() -> void:

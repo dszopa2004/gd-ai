@@ -3,10 +3,14 @@ class_name MessageBox
 extends Container # BoxContainer root once reworked; PanelContainer root still works
 
 signal delete_requested(message: MessageBox)
+signal retry_requested(message: MessageBox)
 
 @export var label: RichTextLabel
 @export var copy_button: BaseButton # Button or TextureButton
 @export var delete_button : BaseButton
+## AI-only regenerate button. Same layout sizing as copy_button; textures are
+## user-supplied via the scene, like the other action buttons.
+@export var retry_button : BaseButton
 @export var bubble: PanelContainer # inner bubble in the reworked scene; null in the legacy scene
 @export var segments: VBoxContainer # segment host; null until the scene adds it (legacy label path meanwhile)
 @export var usage_label: Label
@@ -16,6 +20,7 @@ static var _re_cache := {}
 
 const COPY_TOOLTIP := "Copy response"
 const DELETE_TOOLTIP := "Delete message"
+const RETRY_TOOLTIP := "Retry response"
 const ACTION_MODULATE_NORMAL := Color.WHITE
 const ACTION_MODULATE_HOVER := Color(1.25, 1.25, 1.25)
 const ACTION_MODULATE_PRESSED := Color(0.75, 0.75, 0.75)
@@ -34,6 +39,9 @@ var _hover := false
 var _copy_shown := false
 var _delete_hover := false
 var _delete_shown := false
+var _retry_last := false # dock-set: this box is the last AI message shown (its retry target)
+var _retry_hover := false
+var _retry_shown := false
 var _flat := false
 var _flat_style := StyleBoxEmpty.new()
 var _mono_font: Font = null
@@ -68,6 +76,13 @@ func _ready() -> void:
 		delete_button.mouse_exited.connect(_on_delete_mouse_exited)
 		delete_button.button_down.connect(_on_delete_button_down)
 		delete_button.button_up.connect(_on_delete_button_up)
+	if retry_button != null:
+		retry_button.tooltip_text = RETRY_TOOLTIP
+		retry_button.pressed.connect(_on_retry_pressed)
+		retry_button.mouse_entered.connect(_on_retry_mouse_entered)
+		retry_button.mouse_exited.connect(_on_retry_mouse_exited)
+		retry_button.button_down.connect(_on_retry_button_down)
+		retry_button.button_up.connect(_on_retry_button_up)
 	# Hover funnel: the engine notifies whichever child is under the cursor,
 	# so every hoverable part recomputes from geometry (order-independent).
 	mouse_entered.connect(_queue_hover_refresh)
@@ -81,6 +96,7 @@ func _ready() -> void:
 	_apply_flat() # set_flat may have run before exports resolved
 	_apply_copy_visibility()
 	_apply_delete_visibility()
+	_apply_retry_visibility()
 	_apply_usage()
 
 
@@ -366,6 +382,11 @@ func _apply_flat() -> void:
 		if label != null:
 			label.remove_theme_stylebox_override("normal")
 			label.remove_theme_stylebox_override("focus")
+	# Flat decides which action buttons can ever show; refresh collapse state
+	# so a flat change never leaves a stale slot behind.
+	_apply_copy_visibility()
+	_apply_delete_visibility()
+	_apply_retry_visibility()
 
 
 func is_flat() -> bool:
@@ -388,6 +409,7 @@ func _apply_copy_visibility() -> void:
 	copy_button.visible = true
 	copy_button.mouse_filter = Control.MOUSE_FILTER_STOP if _copy_shown else Control.MOUSE_FILTER_IGNORE
 	_refresh_copy_modulate(false)
+	_apply_retry_visibility() # copy-ready is also the retry finality gate
 
 
 func is_copy_shown() -> bool:
@@ -405,9 +427,10 @@ func _queue_hover_refresh() -> void:
 
 func _refresh_hover() -> void:
 	var mouse := get_global_mouse_position()
-	_hover = _covers_button(copy_button, _copy_shown, mouse) or _covers_button(delete_button, _delete_shown, mouse) or get_global_rect().grow(HOVER_SLOP_PX).has_point(mouse)
+	_hover = _covers_button(copy_button, _copy_shown, mouse) or _covers_button(delete_button, _delete_shown, mouse) or _covers_button(retry_button, _retry_shown, mouse) or get_global_rect().grow(HOVER_SLOP_PX).has_point(mouse)
 	_apply_copy_visibility()
 	_apply_delete_visibility()
+	_apply_retry_visibility()
 
 
 static func _covers_button(button: BaseButton, shown: bool, mouse: Vector2) -> bool:
@@ -464,13 +487,74 @@ func _apply_delete_visibility() -> void:
 	if delete_button == null:
 		return
 	_delete_shown = (not _flat) and _hover
-	delete_button.visible = true
+	# User rows hold the slot (hover reveals must not reflow the chat); AI
+	# rows can never show delete, so the slot collapses instead of gaping.
+	delete_button.visible = not _flat
 	delete_button.mouse_filter = Control.MOUSE_FILTER_STOP if _delete_shown else Control.MOUSE_FILTER_IGNORE
 	_refresh_delete_modulate(false)
 
 
 func is_delete_shown() -> bool:
 	return _delete_shown
+
+
+# Retry shows only on the last AI message and only once its turn is final
+# (_copy_visible is the finality flag, so Thinking/awaiting/streaming turns
+# never offer retry). User messages never show it. Layout-stable like copy.
+func set_retry_last(v: bool) -> void:
+	_retry_last = v
+	_apply_retry_visibility()
+
+
+func _apply_retry_visibility() -> void:
+	if retry_button == null:
+		return
+	_retry_shown = _flat and _retry_last and _copy_visible
+	# AI rows hold the slot (last-flag moves must not reflow); user rows can
+	# never show retry, so the slot collapses instead of gaping.
+	retry_button.visible = _flat
+	retry_button.mouse_filter = Control.MOUSE_FILTER_STOP if _retry_shown else Control.MOUSE_FILTER_IGNORE
+	_refresh_retry_modulate(false)
+
+
+func is_retry_shown() -> bool:
+	return _retry_shown
+
+
+func _on_retry_pressed() -> void:
+	retry_requested.emit(self)
+
+
+func _on_retry_mouse_entered() -> void:
+	_retry_hover = true
+	_refresh_retry_modulate(false)
+	_queue_hover_refresh()
+
+
+func _on_retry_mouse_exited() -> void:
+	_retry_hover = false
+	_refresh_retry_modulate(false)
+	_queue_hover_refresh()
+
+
+func _on_retry_button_down() -> void:
+	_refresh_retry_modulate(true)
+
+
+func _on_retry_button_up() -> void:
+	_refresh_retry_modulate(false)
+
+
+func _refresh_retry_modulate(pressed: bool) -> void:
+	if retry_button == null:
+		return
+	var c := ACTION_MODULATE_NORMAL
+	if pressed:
+		c = ACTION_MODULATE_PRESSED
+	elif _retry_hover:
+		c = ACTION_MODULATE_HOVER
+	c.a = 1.0 if _retry_shown else 0.0
+	retry_button.modulate = c
 
 
 # Per-turn token usage, shown under AI responses once the turn completes.
