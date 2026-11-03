@@ -127,6 +127,7 @@ func _ready() -> void:
 	_setup_dirty_dots()
 	_setup_unsaved_popup()
 	_setup_sign_in_ui()
+	_setup_attach_ui()
 	_update_session_status()
 	if client.session_is_stale():
 		client.refresh_session(true)
@@ -189,6 +190,9 @@ func _refresh_send_button() -> void:
 func _on_input_gui_input(event: InputEvent) -> void:
 	if event is InputEventKey \
 			and event.pressed and not event.echo:
+		if _attach_open and _handle_attach_key(event):
+			user_input_box.accept_event()
+			return
 		if event.keycode == KEY_ESCAPE:
 			# Esc cancels an in-flight request; otherwise let it propagate.
 			if _can_cancel():
@@ -221,6 +225,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 # Signal to handle send button press
 func _on_send_button_pressed() -> void:
+	_hide_attach_popup()
 	if _can_cancel():
 		# The button is in cancel mode while a request is in flight.
 		_on_cancel_requested()
@@ -247,8 +252,17 @@ func _on_send_button_pressed() -> void:
 	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 
+	# @-mentions are parsed here (before the input clears) and cached for the
+	# whole message: every loop turn rebuilds their contents from these paths.
+	_pending_attach_paths = _parse_attach_paths(text)
+	_launch_request(history)
+
+
+# Shared send kernel: fresh editor context, fresh loop state, a pending AI
+# message, then the client call. The caller owns history + input-box handling.
+func _launch_request(history: Array) -> void:
 	# Fresh editor snapshot for this request (never stored in history).
-	client.context_prompt = _build_editor_context()
+	client.context_prompt = _request_context()
 	_loop_active = true
 	_loop_transcript = []
 	_loop_count = 0
@@ -275,6 +289,7 @@ func _on_cancel_requested() -> void:
 		print("[GdAI] Cleared stuck reply UI (no request was active).")
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Request cancelled.")
+		pending_ai_message.set_copy_visible(true)
 	pending_ai_message = null
 	_end_loop()
 
@@ -300,11 +315,23 @@ func _on_ai_stream(full_text: String) -> void:
 func _on_ai_response(text: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(text)
+		pending_ai_message.set_copy_visible(true)
+		_apply_turn_usage()
 	pending_ai_message = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
 	_end_loop() # plain-text reply: the model is done acting
 	_on_user_input_box_text_changed()
+
+
+# Stamp the pending message with the completed turn's token usage (if the
+# endpoint reported any); must run while pending_ai_message is still valid.
+func _apply_turn_usage() -> void:
+	if pending_ai_message == null or not is_instance_valid(pending_ai_message):
+		return
+	if client == null or client.last_usage.is_empty():
+		return
+	pending_ai_message.set_usage(int(client.last_usage.get("prompt_tokens", 0)), int(client.last_usage.get("completion_tokens", 0)))
 
 
 # Structured actions: safe turns auto-run (the loop continues click-free);
@@ -313,6 +340,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var lines: Array[String] = []
 	if not preamble.strip_edges().is_empty():
 		lines.append(preamble.strip_edges())
+		lines.append("") # blank line between the preamble and the turn body
 	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
 	if not all_finish:
 		lines.append("Planned actions:")
@@ -338,6 +366,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 			for result in turn_results:
 				lines.append("✓ " + str(result.get("message", "")))
 		else:
+			lines.append("") # blank line between planned actions and results
 			lines.append("Results:")
 			for result in turn_results:
 				var mark := "✓" if bool(result.get("ok", false)) else "✗"
@@ -359,6 +388,9 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var rendered := "\n".join(lines)
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(rendered)
+		if not needs_approval:
+			pending_ai_message.set_copy_visible(true) # awaiting-approval resolves later
+		_apply_turn_usage()
 	var history_ref = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", rendered)
@@ -686,7 +718,7 @@ func _continue_loop() -> void:
 		_end_loop()
 		return
 	# (send_followup selects required vs stepped-down auto.)
-	client.context_prompt = _build_editor_context()
+	client.context_prompt = _request_context()
 	pending_ai_message = add_message("Thinking…", false)
 	var followup := history.duplicate()
 	followup.append_array(_loop_transcript)
@@ -778,6 +810,7 @@ func _update_pending_record(pending: Dictionary, full_text: String) -> void:
 	var message = pending.get("message")
 	if message != null and is_instance_valid(message):
 		message.set_message_text(full_text)
+		message.set_copy_visible(true) # approve/reject/supersede are terminal
 	var history_ref = pending.get("history_ref")
 	if history_ref is Dictionary:
 		history_ref["content"] = full_text
@@ -789,6 +822,7 @@ func _update_pending_record(pending: Dictionary, full_text: String) -> void:
 func _on_ai_error(message: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Error: " + message)
+		pending_ai_message.set_copy_visible(true)
 	pending_ai_message = null
 	_end_loop()
 
@@ -797,12 +831,24 @@ func _on_ai_error(message: String) -> void:
 
 
 # Helper function to create a message box
-func add_message(text: String, is_user: bool) -> MessageBox:
+func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox:
 	var message: MessageBox = MESSAGE_BOX_SCENE.instantiate()
 	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	message.size_flags_stretch_ratio = BUBBLE_RATIO
+	message.set_flat(not is_user)
+	# Copy appears only once the text is final (never for Thinking/streaming).
+	message.set_copy_visible(copy_ready and not is_user)
+	message.delete_requested.connect(_on_message_delete_requested)
+	message.retry_requested.connect(_on_message_retry_requested)
 	message.set_message_text(text)
 
+	if not is_user:
+		# AI replies flow full-width with no bubble offset (room for code blocks).
+		message_list.add_child(message)
+		_update_retry_visibility()
+		return message # keep this to stream into it
+
+	# User: spacer on the left pushes the bubble right.
+	message.size_flags_stretch_ratio = BUBBLE_RATIO
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.size_flags_stretch_ratio = SPACER_RATIO
@@ -811,17 +857,110 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 0)
-
-	# User: spacer on the left pushes the bubble right. AI: the reverse.
-	if is_user:
-		row.add_child(spacer)
-		row.add_child(message)
-	else:
-		row.add_child(message)
-		row.add_child(spacer)
+	row.add_child(spacer)
+	row.add_child(message)
 
 	message_list.add_child(row)
-	return message # keep this to stream into it
+	_update_retry_visibility()
+	return message
+
+
+# Delete one bubble: drop its UI row plus its history entry (UI order matches
+# history order; both append chronologically, approval/continue rows skipped).
+func _on_message_delete_requested(message: MessageBox) -> void:
+	var idx := _message_ui_index(message)
+	var parent := message.get_parent()
+	if parent != null and parent != message_list and parent.get_parent() == message_list:
+		message_list.remove_child(parent)
+		parent.queue_free()
+	elif parent == message_list:
+		message_list.remove_child(message)
+		message.queue_free()
+	else:
+		return
+	if idx < 0 or current_chat.is_empty():
+		return
+	var messages = current_chat.get("messages", [])
+	if messages is Array and idx < messages.size():
+		messages.remove_at(idx)
+		ChatStore.save_chat(current_chat)
+	_update_retry_visibility() # a delete can move the last-AI target
+
+
+func _message_ui_index(message: MessageBox) -> int:
+	var i := 0
+	for child in message_list.get_children():
+		var box: MessageBox = null
+		if child is MessageBox:
+			box = child
+		elif child is HBoxContainer:
+			for sub in child.get_children():
+				if sub is MessageBox:
+					box = sub
+					break
+		if box == null:
+			continue # approval/continue rows carry no history entry
+		if box == message:
+			return i
+		i += 1
+	return -1
+
+
+# AI messages sit directly under message_list; user bubbles are wrapped in
+# HBox rows, and approval/continue rows hold no MessageBox at all.
+func _ai_messages_in_order() -> Array:
+	var boxes: Array = []
+	if message_list == null:
+		return boxes
+	for child in message_list.get_children():
+		if child is MessageBox:
+			boxes.append(child)
+	return boxes
+
+
+# Only the last AI message offers retry (mirrors the newest-turn replay rule).
+func _update_retry_visibility() -> void:
+	var boxes := _ai_messages_in_order()
+	for i in boxes.size():
+		(boxes[i] as MessageBox).set_retry_last(i == boxes.size() - 1)
+
+
+# Retry = regenerate the last response: drop its bubble + history entry, then
+# re-run the surviving newest user turn through the normal send kernel.
+func _on_message_retry_requested(message: MessageBox) -> void:
+	if client == null or client.busy or _loop_active:
+		return # mid-request (incl. between tool turns): nothing final to redo
+	if message.get_parent() != message_list:
+		return
+	if current_chat.is_empty() or not current_chat.has("messages"):
+		return
+	var history: Array = current_chat["messages"]
+	if not history is Array:
+		return
+	# The target must be the last history entry and an assistant one, preceded
+	# by its user turn; retrying an older turn (history truncation) is out of
+	# scope, so stale presses simply no-op.
+	var idx := _message_ui_index(message)
+	if idx < 1 or idx != history.size() - 1:
+		return
+	var entry = history[idx]
+	if not entry is Dictionary or str(entry.get("role", "")) != "assistant":
+		return
+	var prev = history[idx - 1]
+	if not prev is Dictionary or str(prev.get("role", "")) != "user":
+		return
+	# A retry starts a brand-new turn: any live approval/continue for the old
+	# one is retired first, exactly like a superseding send.
+	if not _pending_approval.is_empty():
+		_supersede_pending_approval()
+	_retire_continue_button()
+	history.remove_at(idx)
+	ChatStore.save_chat(current_chat)
+	pending_ai_message = null
+	message_list.remove_child(message)
+	message.queue_free()
+	_update_retry_visibility()
+	_launch_request(history) # re-inits loop state, Thinking bubble, send
 
 
 func _update_input_height() -> void:
@@ -948,6 +1087,285 @@ static func _open_script_block() -> String:
 		shown = shown.left(OPEN_SCRIPT_BUDGET)
 		tail = "\n… (truncated to %d chars; use read_script for the full file)" % OPEN_SCRIPT_BUDGET
 	return "[Open script] %s (%d lines):\n%s%s" % [path, total_lines, shown, tail]
+
+
+# --- Manual context attach (@-mentions) ---
+# Typing @ in the input opens a script/scene picker; picking inserts the full
+# res:// path as text. On send, @res:// paths are parsed out and their
+# contents appended to the request context (per-message scope: cached paths
+# serve every loop turn of that message, and the next send re-parses).
+const ATTACH_MAX_FILES := 3 # @-mentions honored per message; extras are dropped with a note
+const ATTACH_SCAN_CAP := 500 # res:// files indexed for the picker per opening
+const ATTACH_SHOWN_CAP := 100 # picker rows filled per keystroke
+var _attach_popup: PopupPanel = null
+var _attach_list: ItemList = null
+var _attach_open := false # picker state (window-independent: popup visibility lies headless)
+var _attach_cache: Array[String] = [] # res:// scan, valid only while the picker is open
+var _pending_attach_paths: Array[String] = [] # parsed from the sent text; contents rebuilt every loop turn
+
+
+# Per-turn context: fresh editor snapshot plus the sent message's @-attached
+# files (rebuilt every turn, so loop turns see live buffer edits).
+func _request_context() -> String:
+	return _build_editor_context() + _attach_block_for(_pending_attach_paths)
+
+
+func _setup_attach_ui() -> void:
+	if user_input_box == null:
+		return
+	_attach_popup = PopupPanel.new()
+	_attach_popup.size = Vector2i(440, 260)
+	var margin := MarginContainer.new()
+	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 8)
+	margin.add_theme_constant_override("margin_top", 6)
+	margin.add_theme_constant_override("margin_right", 8)
+	margin.add_theme_constant_override("margin_bottom", 8)
+	_attach_popup.add_child(margin)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	margin.add_child(vbox)
+	var hint := Label.new()
+	hint.text = "Attach a script or scene (@)"
+	hint.add_theme_color_override("font_color", Color(0.6, 0.6, 0.62))
+	vbox.add_child(hint)
+	_attach_list = ItemList.new()
+	_attach_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(_attach_list)
+	add_child(_attach_popup)
+	_attach_list.item_selected.connect(_on_attach_item_chosen)
+	_attach_list.item_activated.connect(_on_attach_item_chosen)
+	_attach_popup.popup_hide.connect(_hide_attach_popup)
+	user_input_box.text_changed.connect(_on_attach_text_changed)
+
+
+func _on_attach_text_changed() -> void:
+	if user_input_box == null or _attach_popup == null:
+		return
+	var found: Array = _attach_query_at_caret()
+	if int(found[0]) < 0:
+		_hide_attach_popup()
+		return
+	_show_attach_popup(str(found[1]))
+
+
+# [at_col, query]: the @-word under the caret on its line, or [-1, ""].
+# A mid-word @ (email) never opens the picker; a trailing space closes it.
+func _attach_query_at_caret() -> Array:
+	if user_input_box == null:
+		return [-1, ""]
+	var line := user_input_box.get_caret_line()
+	var col := user_input_box.get_caret_column()
+	if line < 0 or line >= user_input_box.get_line_count():
+		return [-1, ""]
+	var before := user_input_box.get_line(line).left(col)
+	var at := before.rfind("@")
+	if at < 0:
+		return [-1, ""]
+	if at > 0:
+		var prev := before[at - 1]
+		if prev != " " and prev != "\t":
+			return [-1, ""]
+	var query := before.substr(at + 1)
+	if query.contains(" ") or query.contains("\t"):
+		return [-1, ""]
+	return [at, query]
+
+
+func _show_attach_popup(query: String) -> void:
+	if not _attach_open:
+		_attach_cache = _scan_attach_files() # fresh scan per opening; filters reuse it
+	var matches := _filter_attach_files(_attach_cache, query)
+	_attach_list.clear()
+	var shown := 0
+	for f in matches:
+		if shown >= ATTACH_SHOWN_CAP:
+			break
+		_attach_list.add_item(f)
+		shown += 1
+	if shown == 0:
+		_hide_attach_popup() # no candidates: stay out of the way, plain-@ text still sends
+		return
+	_attach_list.set_block_signals(true) # programmatic select must not attach
+	_attach_list.select(0)
+	_attach_list.set_block_signals(false)
+	var r := user_input_box.get_global_rect()
+	var size := Vector2i(440, 260)
+	var pos := Vector2i(int(r.position.x), int(r.position.y) - size.y - 6)
+	if pos.y < 0:
+		pos.y = int(r.position.y + r.size.y + 6) # no room above: drop below
+	_attach_open = true
+	_attach_popup.popup(Rect2i(pos, size))
+
+
+func _hide_attach_popup() -> void:
+	_attach_open = false
+	_attach_cache = []
+	if _attach_popup != null:
+		_attach_popup.hide()
+
+
+func _on_attach_item_chosen(index: int) -> void:
+	if not _attach_open or _attach_list == null or user_input_box == null:
+		return
+	if index < 0 or index >= _attach_list.item_count:
+		return
+	_insert_attach_path(_attach_list.get_item_text(index))
+
+
+# Replace the @-word under the caret with the picked path plus a space (the
+# trailing space closes the picker via the normal text-changed path).
+func _insert_attach_path(path: String) -> void:
+	var found: Array = _attach_query_at_caret()
+	if int(found[0]) < 0:
+		_hide_attach_popup()
+		return
+	var line := user_input_box.get_caret_line()
+	var col := user_input_box.get_caret_column()
+	user_input_box.remove_text(line, int(found[0]), line, col)
+	user_input_box.set_caret_line(line)
+	user_input_box.set_caret_column(int(found[0]))
+	user_input_box.insert_text_at_caret("@" + path + " ")
+	_hide_attach_popup()
+	user_input_box.grab_focus()
+
+
+# Picker key handling; true when the key was consumed. Enter attaches the
+# selection (top match when nothing is selected) instead of sending.
+func _handle_attach_key(event: InputEventKey) -> bool:
+	match event.keycode:
+		KEY_ESCAPE:
+			_hide_attach_popup()
+			return true
+		KEY_ENTER, KEY_KP_ENTER:
+			if _attach_list != null and _attach_list.item_count > 0:
+				var sel := _attach_list.get_selected_items()
+				_on_attach_item_chosen(sel[0] if not sel.is_empty() else 0)
+			else:
+				_hide_attach_popup()
+			return true
+		KEY_UP, KEY_DOWN:
+			if _attach_list != null and _attach_list.item_count > 0:
+				var sel2 := _attach_list.get_selected_items()
+				var cur := int(sel2[0]) if not sel2.is_empty() else -1
+				cur += 1 if event.keycode == KEY_DOWN else -1
+				_attach_list.set_block_signals(true)
+				_attach_list.select(clampi(cur, 0, _attach_list.item_count - 1))
+				_attach_list.set_block_signals(false)
+			return true
+	return false
+
+
+# All attachable files under res://, sorted. Dot-dirs (.godot, .git, ..) are
+# skipped; the cap bounds keystroke scans on huge projects.
+func _scan_attach_files() -> Array[String]:
+	var out: Array[String] = []
+	var stack: Array[String] = ["res://"]
+	while not stack.is_empty() and out.size() < ATTACH_SCAN_CAP:
+		var dir_path := stack.pop_back()
+		var dir := DirAccess.open(dir_path)
+		if dir == null:
+			continue
+		dir.list_dir_begin()
+		var entry := dir.get_next()
+		while entry != "" and out.size() < ATTACH_SCAN_CAP:
+			var full: String = dir_path.path_join(entry)
+			if dir.current_is_dir():
+				if not entry.begins_with("."):
+					stack.append(full)
+			else:
+				var low := entry.to_lower()
+				if low.ends_with(".gd") or low.ends_with(".tscn"):
+					out.append(full)
+			entry = dir.get_next()
+		dir.list_dir_end()
+	out.sort()
+	return out
+
+
+static func _filter_attach_files(files: Array[String], query: String) -> Array[String]:
+	var q := query.strip_edges().to_lower()
+	if q.is_empty():
+		return files
+	var out: Array[String] = []
+	for f in files:
+		if f.to_lower().contains(q):
+			out.append(f)
+	return out
+
+
+# @res:// paths out of sent text: validated, existing, deduped, in order.
+# Everything else (@john, emails, bad extensions, missing files) stays plain
+# text and simply attaches nothing.
+static func _parse_attach_paths(text: String) -> Array[String]:
+	var out: Array[String] = []
+	var re := RegEx.new()
+	re.compile("@(res://\\S+)")
+	for m in re.search_all(text):
+		var cand := str(m.get_string(1))
+		while not cand.is_empty() and ".,;:!?)]\"'`".contains(cand.right(1)):
+			cand = cand.left(cand.length() - 1)
+		var checked := AiClient.validate_attach_path(cand)
+		if not bool(checked.get("ok", false)):
+			continue
+		var clean: String = checked["path"]
+		if not FileAccess.file_exists(clean):
+			print("[GdAI] attach skipped, not found: %s" % clean)
+			continue
+		if out.has(clean):
+			continue
+		out.append(clean)
+	return out
+
+
+# The sent message's attachments as a context block ("" when none). Scripts
+# prefer the live Script-editor buffer; the open script is already injected
+# above, so it gets a pointer instead of a second copy.
+func _attach_block_for(paths: Array[String]) -> String:
+	if paths.is_empty():
+		return ""
+	var open_path := _current_script_path()
+	var parts: Array[String] = ["", "[Attached files]"]
+	var shown := 0
+	for p in paths:
+		if shown >= ATTACH_MAX_FILES:
+			parts.append("(+%d more, over the %d-file attach limit)" % [paths.size() - shown, ATTACH_MAX_FILES])
+			break
+		if not open_path.is_empty() and p == open_path:
+			parts.append("[Attached: %s — already included above as the open script]" % p)
+			shown += 1
+			continue
+		if not FileAccess.file_exists(p):
+			parts.append("[Attached: %s — file no longer exists, skipped]" % p)
+			shown += 1
+			continue
+		var content := FileAccess.get_file_as_string(p)
+		var source := "disk"
+		if p.to_lower().ends_with(".gd"):
+			var buf := _open_buffer_for(p)
+			if bool(buf.get("open", false)):
+				content = str(buf.get("text", ""))
+				source = "live buffer"
+		var lines := content.count("\n") + 1 if not content.is_empty() else 0
+		var tail := ""
+		if content.length() > MAX_READ_CHARS:
+			content = content.left(MAX_READ_CHARS)
+			tail = "\n… (truncated to %d chars)" % MAX_READ_CHARS
+		parts.append("[Attached: %s (%d lines, %s)]:\n%s%s" % [p, lines, source, content, tail])
+		shown += 1
+	return "\n".join(parts)
+
+
+static func _current_script_path() -> String:
+	if not Engine.is_editor_hint():
+		return ""
+	var script_editor := EditorInterface.get_script_editor()
+	if script_editor == null:
+		return ""
+	var cur: Script = script_editor.get_current_script()
+	if cur == null:
+		return ""
+	return str(cur.resource_path)
 
 
 static func _find_unique_named(root: Node, node_name: String):
@@ -2123,7 +2541,8 @@ func _open_chat(id: String) -> void:
 	if messages is Array:
 		for msg in messages:
 			if msg is Dictionary:
-				add_message(str(msg.get("content", "")), str(msg.get("role", "")) == "user")
+				var is_user := str(msg.get("role", "")) == "user"
+				add_message(str(msg.get("content", "")), is_user, not is_user) # restored AI text is final
 	_on_chat_button_pressed()
 
 

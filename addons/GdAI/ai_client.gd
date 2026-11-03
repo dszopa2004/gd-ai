@@ -77,6 +77,7 @@ var _stream_tool_calls: Dictionary = {}
 var _stream_finish_reason := ""
 var _stream_tool_announced := false
 var _history_dropped := 0
+var last_usage: Dictionary = {} # tokens of the latest completed turn; dock reads after response/tool signals
 var _oauth_http: HTTPRequest
 var _oauth_step := "" # "code" | "poll" | "mint" while awaiting that response ("wait" between polls)
 var _oauth_device_code := ""
@@ -225,6 +226,7 @@ func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 
 # Start a request to AI
 func _start_request() -> void:
+	last_usage = {} # reset per attempt (fresh sends, retries, fallback re-entry)
 	var key := _sanitize_key(api_key) # Sanitize key
 
 	# Handle no API key set
@@ -650,6 +652,7 @@ func _send_stream(messages: Array, key: String) -> void:
 		"reasoning_effort": reasoning_effort,
 		"max_completion_tokens": max_completion_tokens,
 		"stream": true,
+		"stream_options": {"include_usage": true},
 	}
 	_apply_tool_fields(payload)
 	_stream_body = JSON.stringify(payload)
@@ -782,6 +785,17 @@ func _append_stream_text(text: String) -> void:
 		_handle_sse_line(lines[i].strip_edges())
 
 
+# Normalize a response usage block into ints; ignored when absent/empty.
+func _capture_usage(parsed: Dictionary) -> void:
+	var u = parsed.get("usage", {})
+	if u is Dictionary and not (u as Dictionary).is_empty():
+		last_usage = {
+			"prompt_tokens": int((u as Dictionary).get("prompt_tokens", 0)),
+			"completion_tokens": int((u as Dictionary).get("completion_tokens", 0)),
+			"total_tokens": int((u as Dictionary).get("total_tokens", 0)),
+		}
+
+
 # Handle SSE
 func _handle_sse_line(line: String) -> void:
 	if line.is_empty() or line.begins_with(":"):
@@ -800,6 +814,7 @@ func _handle_sse_line(line: String) -> void:
 	if parsed.get("error") != null:
 		_finish_stream_error(_stream_error_message(parsed["error"]))
 		return
+	_capture_usage(parsed) # first: usage-only chunks carry no choices
 	var choices = parsed.get("choices", [])
 	if not choices is Array or choices.is_empty():
 		return
@@ -1085,9 +1100,35 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 		kept.push_front(msg)
 		chars += text.length()
 		count += 1
+	# Repair 1: never strand a tool result. A huge newest message can eat the
+	# whole budget, leaving a lone leading tool that the strip below would
+	# pop — yielding zero messages and a 400. Extend back to its assistant
+	# owner instead (an intact pair may legally lead; budget yields here).
+	if not kept.is_empty() and kept[0] is Dictionary and str(kept[0].get("role", "")) == "tool":
+		var idx := messages.size() - kept.size() - 1
+		while idx >= 0:
+			var prev = messages[idx]
+			kept.push_front(prev)
+			idx -= 1
+			if prev is Dictionary:
+				var r := str(prev.get("role", ""))
+				if r == "user":
+					break
+				if r == "assistant":
+					var tc = prev.get("tool_calls", [])
+					if tc is Array and not tc.is_empty():
+						break
 	# Never start on a dangling turn (an intact assistant tool pair may lead).
 	while not kept.is_empty() and kept[0] is Dictionary and _is_dangling_lead(kept[0]):
 		kept.pop_front()
+	# Repair 2: if the strip emptied everything, fall back to the newest user
+	# turn alone rather than sending a messageless (400-guaranteed) payload.
+	if kept.is_empty() and not messages.is_empty():
+		for i in range(messages.size() - 1, -1, -1):
+			var msg = messages[i]
+			if msg is Dictionary and str(msg.get("role", "")) == "user":
+				kept.append(msg)
+				break
 	return {"messages": kept, "dropped": messages.size() - kept.size()}
 
 
@@ -1125,6 +1166,29 @@ static func validate_script_path(raw_path: String) -> Dictionary:
 		return {"ok": false, "path": "", "error": "script path must end with .gd"}
 	if clean.get_file().length() <= 3:
 		return {"ok": false, "path": "", "error": "script path has no file name"}
+	return {"ok": true, "path": clean, "error": ""}
+
+
+# Attach-path gate for @-mentions: same res:// sandbox as scripts, but both
+# scripts (.gd) and scenes (.tscn) may be attached to a message.
+static func validate_attach_path(raw_path: String) -> Dictionary:
+	var clean := raw_path.strip_edges().replace("\\", "/")
+	if clean.is_empty():
+		return {"ok": false, "path": "", "error": "attach path is empty"}
+	if clean.contains("://"):
+		if not clean.begins_with("res://"):
+			return {"ok": false, "path": "", "error": "attach path must be inside res://"}
+	else:
+		if clean.begins_with("/") or clean.contains(":"):
+			return {"ok": false, "path": "", "error": "attach path must be inside res://"}
+		clean = "res://" + clean
+	if clean.contains(".."):
+		return {"ok": false, "path": "", "error": "attach path must not contain '..'"}
+	var low := clean.to_lower()
+	if not low.ends_with(".gd") and not low.ends_with(".tscn"):
+		return {"ok": false, "path": "", "error": "attach path must end with .gd or .tscn"}
+	if clean.get_file().length() <= 3:
+		return {"ok": false, "path": "", "error": "attach path has no file name"}
 	return {"ok": true, "path": clean, "error": ""}
 
 
@@ -1449,6 +1513,7 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 	if not parsed is Dictionary:
 		request_failed.emit("Unexpected response from server.")
 		return
+	_capture_usage(parsed)
 
 	# Get choices from response
 	var choices = parsed.get("choices", [])
