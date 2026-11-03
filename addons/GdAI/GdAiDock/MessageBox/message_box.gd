@@ -30,6 +30,13 @@ const CODE_BG_COLOR := Color(0.122, 0.122, 0.141)
 const CODE_FG_COLOR := Color(0.87, 0.87, 0.88)
 const CODE_RADIUS := 6
 const CODE_BORDER := Color(1, 1, 1, 0.09)
+# Syntax-highlight palette for code blocks (dark CODE_BG backdrop).
+const HL_KEYWORD := "#ff7085"
+const HL_STRING := "#ffeda1"
+const HL_COMMENT := "#808080"
+const HL_NUMBER := "#a1ffe0"
+const HL_FUNCTION := "#66c3ff"
+const HL_MEMBER := "#bce0ff"
 
 var _pending_text := ""
 var _usage: Dictionary = {}
@@ -141,6 +148,225 @@ static func _escape_bbcode(s: String) -> String:
 	return s.replace("[", "\\[").replace("]", "\\]")
 
 
+# Per-language lexer config: keywords, line-comment marker, block-comment
+# pair, single-line string quotes, triple-quote openers (checked first).
+# Unknown languages return {} and render as plain escaped code — never
+# mis-highlighted under a guessed grammar.
+static func _lang_spec(lang: String) -> Dictionary:
+	match lang:
+		"gdscript", "gd":
+			return {
+				"keywords": ["extends", "class_name", "signal", "enum", "const", "static", "var", "func", "return", "pass", "break", "continue", "if", "elif", "else", "for", "while", "match", "in", "is", "as", "and", "or", "not", "self", "super", "true", "false", "null", "void", "await", "breakpoint", "get", "set", "PI", "TAU", "INF", "NAN"],
+				"line": "#",
+				"block": [],
+				"strings": ["\"", "'"],
+				"triple": ["\"\"\""],
+			}
+		"python", "py":
+			return {
+				"keywords": ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "case", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "match", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"],
+				"line": "#",
+				"block": [],
+				"strings": ["\"", "'"],
+				"triple": ["\"\"\"", "'''"],
+			}
+		"json":
+			return {
+				"keywords": ["true", "false", "null"],
+				"line": "",
+				"block": [],
+				"strings": ["\""],
+				"triple": [],
+			}
+		"csharp", "cs", "c#":
+			return {
+				"keywords": ["using", "namespace", "class", "struct", "enum", "interface", "record", "const", "static", "readonly", "void", "var", "int", "uint", "long", "ulong", "short", "ushort", "byte", "sbyte", "char", "string", "bool", "object", "dynamic", "float", "double", "decimal", "if", "else", "for", "foreach", "while", "do", "switch", "case", "default", "break", "continue", "goto", "return", "try", "catch", "finally", "throw", "new", "this", "base", "true", "false", "null", "async", "await", "public", "private", "protected", "internal", "sealed", "override", "virtual", "abstract", "partial", "extern", "get", "set", "value", "out", "ref", "in", "params", "is", "as", "typeof", "sizeof", "nameof"],
+				"line": "//",
+				"block": ["/*", "*/"],
+				"strings": ["\"", "'"],
+				"triple": [],
+			}
+		"cpp", "c", "h", "hpp", "c++":
+			return {
+				"keywords": ["auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr", "continue", "default", "delete", "do", "double", "else", "enum", "explicit", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace", "new", "nullptr", "operator", "private", "protected", "public", "return", "short", "signed", "sizeof", "static", "struct", "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while"],
+				"line": "//",
+				"block": ["/*", "*/"],
+				"strings": ["\"", "'"],
+				"triple": [],
+			}
+		"glsl", "shader", "gdshader", "vert", "frag":
+			return {
+				"keywords": ["shader_type", "render_mode", "uniform", "varying", "const", "in", "out", "inout", "highp", "mediump", "lowp", "precision", "invariant", "void", "bool", "int", "uint", "float", "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "uvec2", "uvec3", "uvec4", "mat2", "mat3", "mat4", "sampler2D", "sampler3D", "samplerCube", "struct", "if", "else", "for", "while", "do", "break", "continue", "return", "discard", "true", "false", "layout", "binding", "readonly", "writeonly", "centroid", "flat", "smooth", "noperspective"],
+				"line": "//",
+				"block": ["/*", "*/"],
+				"strings": ["\""],
+				"triple": [],
+			}
+		"javascript", "js":
+			return {
+				"keywords": ["break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "let", "new", "null", "return", "static", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield", "await", "async", "of", "from", "as", "get", "set"],
+				"line": "//",
+				"block": ["/*", "*/"],
+				"strings": ["\"", "'"],
+				"triple": [],
+			}
+		"bash", "sh", "shell":
+			return {
+				"keywords": ["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "in", "case", "esac", "select", "function", "return", "exit", "echo", "printf", "local", "export", "readonly", "shift", "break", "continue"],
+				"line": "#",
+				"block": [],
+				"strings": ["\"", "'"],
+				"triple": [],
+			}
+	return {}
+
+
+# Highlight one fence body as BBCode. A single linear pass (it re-runs on
+# every stream update); unclosed strings/comments run to end-of-input so
+# mid-stream text stays valid, and brackets are always escaped so code can
+# never inject tags. Beyond keywords/strings/comments/numbers: word( calls,
+# .members, @annotations, and $NodePaths get their own colors.
+static func highlight_code(code: String, lang: String) -> String:
+	var spec := _lang_spec(lang.strip_edges().to_lower())
+	if spec.is_empty():
+		return _escape_bbcode(code)
+	var keywords: Array = spec["keywords"]
+	var line_c := str(spec.get("line", ""))
+	var block: Array = spec.get("block", [])
+	var quotes: Array = spec.get("strings", [])
+	var triples: Array = spec.get("triple", [])
+	var out: Array[String] = []
+	var i := 0
+	var n := code.length()
+	while i < n:
+		if line_c != "" and code.substr(i, line_c.length()) == line_c:
+			var eol := code.find("\n", i)
+			if eol < 0:
+				eol = n
+			out.append("[color=" + HL_COMMENT + "][i]" + _escape_bbcode(code.substr(i, eol - i)) + "[/i][/color]")
+			i = eol
+			continue
+		if not block.is_empty() and code.substr(i, str(block[0]).length()) == str(block[0]):
+			var close := str(block[1])
+			var bend := code.find(close, i + str(block[0]).length())
+			if bend < 0:
+				bend = n
+			else:
+				bend += close.length()
+			out.append("[color=" + HL_COMMENT + "][i]" + _escape_bbcode(code.substr(i, bend - i)) + "[/i][/color]")
+			i = bend
+			continue
+		var tri_end := _triple_end(code, i, triples)
+		if tri_end >= 0:
+			out.append("[color=" + HL_STRING + "]" + _escape_bbcode(code.substr(i, tri_end - i)) + "[/color]")
+			i = tri_end
+			continue
+		if quotes.has(code[i]):
+			var lit := _scan_string(code, i)
+			out.append("[color=" + HL_STRING + "]" + _escape_bbcode(lit) + "[/color]")
+			i += lit.length()
+			continue
+		if code[i] == "$" and i + 1 < n:
+			if code[i + 1] == "\"":
+				var qs := _scan_string(code, i + 1)
+				out.append("[color=" + HL_STRING + "]$" + _escape_bbcode(qs) + "[/color]")
+				i += 1 + qs.length()
+				continue
+			if _is_ident(code[i + 1]):
+				var m := i + 1
+				while m < n and (_is_ident(code[m]) or code[m] == "/" or code[m] == "%"):
+					m += 1
+				out.append("[color=" + HL_MEMBER + "]" + _escape_bbcode(code.substr(i, m - i)) + "[/color]")
+				i = m
+				continue
+		if code[i] == "@" and i + 1 < n and _is_ident_start(code[i + 1]):
+			var a := i + 1
+			while a < n and _is_ident(code[a]):
+				a += 1
+			out.append("[color=" + HL_KEYWORD + "]" + _escape_bbcode(code.substr(i, a - i)) + "[/color]")
+			i = a
+			continue
+		if _is_ident_start(code[i]) or _is_digit(code[i]):
+			var w := i
+			while w < n and _is_ident(code[w]):
+				w += 1
+			var word := code.substr(i, w - i)
+			if _is_digit(word[0]):
+				var tail := _re("^(\\.\\d[\\d_]*)?([eE][+-]?\\d[\\d_]*)?").search(code.substr(w)).get_string(0)
+				word += tail
+				w += tail.length()
+				if _re("^(0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\\d[\\d_]*(\\.\\d[\\d_]*)?([eE][+-]?\\d[\\d_]*)?)$").search(word) != null:
+					out.append("[color=" + HL_NUMBER + "]" + _escape_bbcode(word) + "[/color]")
+				else:
+					out.append(_escape_bbcode(word))
+			elif i > 0 and code[i - 1] == ".":
+				out.append("[color=" + HL_MEMBER + "]" + _escape_bbcode(word) + "[/color]")
+			elif keywords.has(word):
+				out.append("[color=" + HL_KEYWORD + "]" + _escape_bbcode(word) + "[/color]")
+			elif _followed_by_paren(code, w):
+				out.append("[color=" + HL_FUNCTION + "]" + _escape_bbcode(word) + "[/color]")
+			else:
+				out.append(_escape_bbcode(word))
+			i = w
+			continue
+		out.append(_escape_bbcode(code[i]))
+		i += 1
+	return "".join(out)
+
+
+# End index (exclusive) of the triple-quoted string opening at i, or -1 when
+# no triple opener matches there. Unclosed runs to end-of-input.
+static func _triple_end(code: String, i: int, triples: Array) -> int:
+	for t in triples:
+		var opener := str(t)
+		if code.substr(i, opener.length()) == opener:
+			var n := code.length()
+			var j := i + opener.length()
+			while j < n:
+				if code[j] == "\\":
+					j += 2
+					continue
+				if code.substr(j, opener.length()) == opener:
+					return j + opener.length()
+				j += 1
+			return n
+	return -1
+
+
+# Raw substring of the single-line string whose opening quote is at i:
+# backslash escapes honored, closing quote included, unclosed runs to EOL.
+static func _scan_string(code: String, i: int) -> String:
+	var q := code[i]
+	var j := i + 1
+	var n := code.length()
+	while j < n and code[j] != q and code[j] != "\n":
+		if code[j] == "\\":
+			j += 1
+		j += 1
+	if j < n and code[j] == q:
+		j += 1
+	return code.substr(i, j - i)
+
+
+static func _followed_by_paren(code: String, w: int) -> bool:
+	var p := w
+	while p < code.length() and (code[p] == " " or code[p] == "\t"):
+		p += 1
+	return p < code.length() and code[p] == "("
+
+
+static func _is_digit(c: String) -> bool:
+	return c >= "0" and c <= "9"
+
+
+static func _is_ident_start(c: String) -> bool:
+	return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+
+static func _is_ident(c: String) -> bool:
+	return _is_ident_start(c) or _is_digit(c)
+
+
 # Legacy single-label path: fences to BBCode (prose markdown-lite, code escaped).
 static func render_markdown(text: String) -> String:
 	if not text.contains("```"):
@@ -149,7 +375,7 @@ static func render_markdown(text: String) -> String:
 	for part in split_markdown(text):
 		var d: Dictionary = part
 		if bool(d.get("code", false)):
-			out.append("[bgcolor=" + CODE_BG + "][code]" + _escape_bbcode(str(d.get("text", ""))) + "[/code][/bgcolor]")
+			out.append("[bgcolor=" + CODE_BG + "][code]" + highlight_code(str(d.get("text", "")), str(d.get("lang", ""))) + "[/code][/bgcolor]")
 		else:
 			out.append(markdown_lite(str(d.get("text", ""))))
 	return "\n".join(out)
@@ -271,8 +497,8 @@ func _make_code_block(code_text: String, lang: String) -> PanelContainer:
 	header.add_child(_make_code_copy_button(code_text))
 	vbox.add_child(header)
 	var l := RichTextLabel.new()
-	l.bbcode_enabled = false # literal code: no escaping needed
-	l.text = code_text
+	l.bbcode_enabled = true # highlighted code: highlight_code escapes brackets
+	l.text = highlight_code(code_text, lang)
 	l.fit_content = true
 	l.scroll_active = false
 	l.selection_enabled = true
