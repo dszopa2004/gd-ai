@@ -313,6 +313,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 	var lines: Array[String] = []
 	if not preamble.strip_edges().is_empty():
 		lines.append(preamble.strip_edges())
+		lines.append("") # blank line between the preamble and the turn body
 	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
 	if not all_finish:
 		lines.append("Planned actions:")
@@ -338,6 +339,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 			for result in turn_results:
 				lines.append("✓ " + str(result.get("message", "")))
 		else:
+			lines.append("") # blank line between planned actions and results
 			lines.append("Results:")
 			for result in turn_results:
 				var mark := "✓" if bool(result.get("ok", false)) else "✗"
@@ -800,9 +802,16 @@ func _on_ai_error(message: String) -> void:
 func add_message(text: String, is_user: bool) -> MessageBox:
 	var message: MessageBox = MESSAGE_BOX_SCENE.instantiate()
 	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	message.size_flags_stretch_ratio = BUBBLE_RATIO
+	message.set_flat(not is_user)
 	message.set_message_text(text)
 
+	if not is_user:
+		# AI replies flow full-width with no bubble offset (room for code blocks).
+		message_list.add_child(message)
+		return message # keep this to stream into it
+
+	# User: spacer on the left pushes the bubble right.
+	message.size_flags_stretch_ratio = BUBBLE_RATIO
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.size_flags_stretch_ratio = SPACER_RATIO
@@ -811,17 +820,11 @@ func add_message(text: String, is_user: bool) -> MessageBox:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 0)
-
-	# User: spacer on the left pushes the bubble right. AI: the reverse.
-	if is_user:
-		row.add_child(spacer)
-		row.add_child(message)
-	else:
-		row.add_child(message)
-		row.add_child(spacer)
+	row.add_child(spacer)
+	row.add_child(message)
 
 	message_list.add_child(row)
-	return message # keep this to stream into it
+	return message
 
 
 func _update_input_height() -> void:
