@@ -41,7 +41,7 @@ Pick one option. The dock needs a key before it can send messages.
 3. Open the shown URL in a browser and enter the code.
 4. The status label confirms you're signed in. Press the same button to sign out.
 
-> **Screenshot:** Settings tab showing the Sign in button and session status.
+<img width="1299" height="412" alt="image" src="https://github.com/user-attachments/assets/028c30be-1d45-480f-a70a-721838691a1f" />
 
 **Option B — Paste an API key**
 
@@ -119,7 +119,7 @@ Explain what @res://player/controller.gd does.
 - Attaching the already-open script is free — it's already in context.
 - Emails and plain `@name` text are ignored; only real `res://` paths attach.
 
-> **Screenshot:** the @ picker open above the input box.
+<img width="1302" height="502" alt="image" src="https://github.com/user-attachments/assets/16d41c3a-8aef-4235-b83d-a46fb3974dc4" />
 
 ### Settings
 
