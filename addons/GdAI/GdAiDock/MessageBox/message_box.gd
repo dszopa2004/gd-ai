@@ -8,6 +8,7 @@ signal delete_requested(message: MessageBox)
 @export var copy_button: BaseButton # Button or TextureButton
 @export var delete_button : BaseButton
 @export var bubble: PanelContainer # inner bubble in the reworked scene; null in the legacy scene
+@export var segments: VBoxContainer # segment host; null until the scene adds it (legacy label path meanwhile)
 
 static var _bubble_warned := false
 
@@ -17,6 +18,11 @@ const ACTION_MODULATE_NORMAL := Color.WHITE
 const ACTION_MODULATE_HOVER := Color(1.25, 1.25, 1.25)
 const ACTION_MODULATE_PRESSED := Color(0.75, 0.75, 0.75)
 const HOVER_SLOP_PX := 1.0 # forgiveness for landings exactly on a rect edge
+const CODE_BG := "#1f1f24"
+const CODE_BG_COLOR := Color(0.122, 0.122, 0.141)
+const CODE_FG_COLOR := Color(0.87, 0.87, 0.88)
+const CODE_RADIUS := 6
+const CODE_BORDER := Color(1, 1, 1, 0.09)
 
 var _pending_text := ""
 var _copy_visible := false
@@ -27,10 +33,16 @@ var _delete_hover := false
 var _delete_shown := false
 var _flat := false
 var _flat_style := StyleBoxEmpty.new()
+var _mono_font: Font = null
 
 
 func _ready() -> void:
-	label.text = _pending_text
+	if segments != null:
+		_render_segments(_pending_text)
+		if label != null:
+			label.visible = false # superseded; safe to delete from the scene
+	elif label != null:
+		label.text = render_markdown(_pending_text)
 	if bubble == null and get_class() != "PanelContainer" and not _bubble_warned:
 		_bubble_warned = true
 		push_warning("[GdAI] MessageBox bubble export is unassigned.")
@@ -64,11 +76,125 @@ func _ready() -> void:
 
 
 func set_message_text(text: String) -> void:
-	_pending_text = text
-	if label != null:
-		label.text = text
+	_pending_text = text # raw markdown: clipboard and history keep this
+	if segments != null:
+		_render_segments(text)
+	elif label != null:
+		label.text = render_markdown(text)
 	if copy_button != null:
 		copy_button.tooltip_text = COPY_TOOLTIP
+
+
+# Split raw text into [{code: bool, text: String}] on ``` fences. Empty parts
+# are dropped; an unclosed fence (mid-stream) runs to the end; lang tags drop.
+static func split_markdown(text: String) -> Array:
+	var parts: Array = []
+	var buf: Array[String] = []
+	var in_code := false
+	for line in text.split("\n"):
+		if line.strip_edges().begins_with("```"):
+			_flush_part(parts, buf, in_code)
+			in_code = not in_code
+		else:
+			buf.append(line)
+	_flush_part(parts, buf, in_code)
+	return parts
+
+
+static func _flush_part(parts: Array, buf: Array[String], was_code: bool) -> void:
+	if buf.is_empty():
+		return
+	parts.append({"code": was_code, "text": "\n".join(buf)})
+	buf.clear()
+
+
+static func _escape_bbcode(s: String) -> String:
+	return s.replace("[", "\\[").replace("]", "\\]")
+
+
+# Legacy single-label path: fences to BBCode (prose untouched, code escaped).
+static func render_markdown(text: String) -> String:
+	if not text.contains("```"):
+		return text
+	var out: Array[String] = []
+	for part in split_markdown(text):
+		var d: Dictionary = part
+		if bool(d.get("code", false)):
+			out.append("[bgcolor=" + CODE_BG + "][code]" + _escape_bbcode(str(d.get("text", ""))) + "[/code][/bgcolor]")
+		else:
+			out.append(str(d.get("text", "")))
+	return "\n".join(out)
+
+
+# Segmented path: prose labels plus real PanelContainers for code.
+func _render_segments(raw: String) -> void:
+	for c in segments.get_children():
+		segments.remove_child(c)
+		c.queue_free()
+	for part in split_markdown(raw):
+		var d: Dictionary = part
+		if bool(d.get("code", false)):
+			segments.add_child(_make_code_block(str(d.get("text", ""))))
+		else:
+			segments.add_child(_make_prose_label(str(d.get("text", ""))))
+
+
+func _make_prose_label(prose: String) -> RichTextLabel:
+	var l := RichTextLabel.new()
+	l.bbcode_enabled = true
+	l.text = prose
+	l.fit_content = true
+	l.scroll_active = false
+	l.selection_enabled = true
+	l.focus_mode = Control.FOCUS_CLICK
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	if _flat:
+		l.add_theme_stylebox_override("normal", _flat_style)
+		l.add_theme_stylebox_override("focus", _flat_style)
+	l.mouse_entered.connect(_queue_hover_refresh)
+	l.mouse_exited.connect(_queue_hover_refresh)
+	return l
+
+
+func _make_code_block(code_text: String) -> PanelContainer:
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = CODE_BG_COLOR
+	sb.set_corner_radius_all(CODE_RADIUS)
+	sb.set_border_width_all(1)
+	sb.border_color = CODE_BORDER
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 10)
+	margin.add_theme_constant_override("margin_top", 8)
+	margin.add_theme_constant_override("margin_right", 10)
+	margin.add_theme_constant_override("margin_bottom", 8)
+	var l := RichTextLabel.new()
+	l.bbcode_enabled = false # literal code: no escaping needed
+	l.text = code_text
+	l.fit_content = true
+	l.scroll_active = false
+	l.selection_enabled = true
+	l.focus_mode = Control.FOCUS_CLICK
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	l.add_theme_font_override("normal_font", _mono_font_cached())
+	l.add_theme_color_override("default_color", CODE_FG_COLOR)
+	margin.add_child(l)
+	panel.add_child(margin)
+	panel.mouse_entered.connect(_queue_hover_refresh)
+	panel.mouse_exited.connect(_queue_hover_refresh)
+	l.mouse_entered.connect(_queue_hover_refresh)
+	l.mouse_exited.connect(_queue_hover_refresh)
+	return panel
+
+
+func _mono_font_cached() -> Font:
+	if _mono_font == null:
+		var mono := SystemFont.new()
+		mono.font_names = PackedStringArray(["Menlo", "Consolas", "Courier New", "monospace"])
+		_mono_font = mono # size comes from the label theme at draw time, matching prose
+	return _mono_font
 
 
 func append_message_text(chunk: String) -> void:

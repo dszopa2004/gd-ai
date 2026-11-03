@@ -1085,9 +1085,35 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 		kept.push_front(msg)
 		chars += text.length()
 		count += 1
+	# Repair 1: never strand a tool result. A huge newest message can eat the
+	# whole budget, leaving a lone leading tool that the strip below would
+	# pop — yielding zero messages and a 400. Extend back to its assistant
+	# owner instead (an intact pair may legally lead; budget yields here).
+	if not kept.is_empty() and kept[0] is Dictionary and str(kept[0].get("role", "")) == "tool":
+		var idx := messages.size() - kept.size() - 1
+		while idx >= 0:
+			var prev = messages[idx]
+			kept.push_front(prev)
+			idx -= 1
+			if prev is Dictionary:
+				var r := str(prev.get("role", ""))
+				if r == "user":
+					break
+				if r == "assistant":
+					var tc = prev.get("tool_calls", [])
+					if tc is Array and not tc.is_empty():
+						break
 	# Never start on a dangling turn (an intact assistant tool pair may lead).
 	while not kept.is_empty() and kept[0] is Dictionary and _is_dangling_lead(kept[0]):
 		kept.pop_front()
+	# Repair 2: if the strip emptied everything, fall back to the newest user
+	# turn alone rather than sending a messageless (400-guaranteed) payload.
+	if kept.is_empty() and not messages.is_empty():
+		for i in range(messages.size() - 1, -1, -1):
+			var msg = messages[i]
+			if msg is Dictionary and str(msg.get("role", "")) == "user":
+				kept.append(msg)
+				break
 	return {"messages": kept, "dropped": messages.size() - kept.size()}
 
 

@@ -6,16 +6,17 @@
 [ext_resource type="Texture2D" uid="uid://blyjj0fgpncoe" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon.png" id="4_fo1ca"]
 [ext_resource type="Texture2D" uid="uid://3nqrrkiq72hi" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon_hover.png" id="5_o4qow"]
 
-[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("label", "copy_button", "delete_button", "bubble")]
+[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("label", "copy_button", "delete_button", "bubble", "segments")]
 anchors_preset = 10
 anchor_right = 1.0
 offset_bottom = 78.0
 grow_horizontal = 2
 script = ExtResource("1_744v6")
-label = NodePath("Bubble/VBoxContainer/MarginContainer/RichTextLabel")
+label = NodePath("Bubble/VBoxContainer/MarginContainer/Segments/RichTextLabel")
 copy_button = NodePath("HBoxContainer/CopyButton")
 delete_button = NodePath("HBoxContainer/DeleteButton")
 bubble = NodePath("Bubble")
+segments = NodePath("Bubble/VBoxContainer/MarginContainer/Segments")
 
 [node name="Bubble" type="PanelContainer" parent="." unique_id=1338042059]
 layout_mode = 2
@@ -31,7 +32,11 @@ theme_override_constants/margin_top = 6
 theme_override_constants/margin_right = 8
 theme_override_constants/margin_bottom = 6
 
-[node name="RichTextLabel" type="RichTextLabel" parent="Bubble/VBoxContainer/MarginContainer" unique_id=1147252]
+[node name="Segments" type="VBoxContainer" parent="Bubble/VBoxContainer/MarginContainer" unique_id=786592460]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="RichTextLabel" type="RichTextLabel" parent="Bubble/VBoxContainer/MarginContainer/Segments" unique_id=1147252]
 custom_minimum_size = Vector2(0, 30)
 layout_mode = 2
 focus_mode = 2
@@ -56,6 +61,7 @@ ignore_texture_size = true
 stretch_mode = 0
 
 [node name="DeleteButton" type="TextureButton" parent="HBoxContainer" unique_id=1026954952]
+modulate = Color(1, 1, 1, 0)
 custom_minimum_size = Vector2(32, 32)
 layout_mode = 2
 size_flags_horizontal = 0
