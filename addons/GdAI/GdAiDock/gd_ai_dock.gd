@@ -28,13 +28,25 @@ extends Control
 @export var model_picker: OptionButton
 @export var loop_cap_spin: SpinBox
 
+@export_category("Settings Dirty Indicators")
+@export var api_key_dirty_dot: Label
+@export var endpoint_dirty_dot: Label
+@export var model_dirty_dot: Label
+@export var loop_cap_dirty_dot: Label
+
 @export_category("Sign In")
+@export var sign_in_popup : PanelContainer
 @export var sign_in_button: Button
 @export var session_status_label: Label
 @export var sign_in_code_field: LineEdit
 @export var sign_in_open_browser_button: Button
 @export var sign_in_cancel_button: Button
 @export var sign_out_button: Button # stacked with sign_in_button; visibility swaps by session
+
+@export_category("Unsaved Changes Popup")
+@export var unsaved_changes_container : PanelContainer
+@export var save_changes_button : Button 
+@export var exit_without_save_button : Button
 
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
@@ -49,6 +61,8 @@ const SCRIPT_PREVIEW_LINES := 24 # max diff/content lines shown per script call 
 # Control.LayoutMode enum values (the enum itself is not exposed to scripts; verified on 4.6).
 const LAYOUT_MODE_POSITION := 0
 const LAYOUT_MODE_ANCHORS := 1
+const DIRTY_DOT_TEXT := "●"
+const DIRTY_DOT_COLOR := Color(1.0, 0.75, 0.25)
 
 var current_chat: Dictionary = {}
 var client: AiClient
@@ -68,8 +82,11 @@ var _loop_generation := 0 # user-message stamp; an approval from an older genera
 var _continue_button = null # live Continue button, if a capped turn is resumable
 var _continue_generation := -1 # user-message stamp the live Continue button belongs to
 var _sign_in_uri := "" # verification URL for the in-flight device flow (step 2)
+var _pending_tab := "" # tab waiting behind the unsaved-changes popup ("chat"/"history"); "" when none
 
 func _ready() -> void:
+	if Engine.is_editor_hint() and get_tree() != null and get_tree().edited_scene_root == self:
+		return # inert preview: this instance is the scene open for editing, not the live dock
 	# Tab button signals
 	chat_button.pressed.connect(_on_chat_button_pressed)
 	history_button.pressed.connect(_on_history_button_pressed)
@@ -107,6 +124,8 @@ func _ready() -> void:
 	client.load_config()
 	max_loop_turns = _load_loop_cap()
 	_setup_settings_ui()
+	_setup_dirty_dots()
+	_setup_unsaved_popup()
 	_setup_sign_in_ui()
 	_update_session_status()
 	if client.session_is_stale():
@@ -123,6 +142,12 @@ func _ready() -> void:
 
 # Signal for chat button press
 func _on_chat_button_pressed() -> void:
+	if not _confirm_leave_settings("chat"):
+		return
+	_show_chat_tab()
+
+
+func _show_chat_tab() -> void:
 	chat_button.button_pressed = true
 	chat_menu.visible = true
 	history_menu.visible = false
@@ -811,6 +836,13 @@ func _update_input_height() -> void:
 
 # Signal for history button press
 func _on_history_button_pressed() -> void:
+	if not _confirm_leave_settings("history"):
+		return
+	_show_history_tab()
+
+
+func _show_history_tab() -> void:
+	history_button.button_pressed = true
 	history_menu.visible = true
 	chat_menu.visible = false
 	settings_menu.visible = false
@@ -953,6 +985,8 @@ func _setup_settings_ui() -> void:
 		push_warning("[GdAI] Settings menu export is unassigned.")
 	if api_key_field == null or endpoint_field == null or model_picker == null or loop_cap_spin == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
+	if api_key_field != null:
+		api_key_field.secret = true
 	_sync_settings_fields()
 
 
@@ -968,6 +1002,9 @@ static func _load_loop_cap() -> int:
 
 # Handle settings button press
 func _on_settings_button_pressed() -> void:
+	_cancel_pending_tab() # staying on Settings answers the popup: drop any pending switch
+	if settings_menu != null and settings_menu.visible:
+		return # already viewing Settings: keep unsaved edits instead of re-syncing
 	settings_menu.visible = true
 	history_menu.visible = false
 	chat_menu.visible = false
@@ -987,12 +1024,16 @@ func _sync_settings_fields() -> void:
 	if client == null:
 		return
 	if api_key_field != null:
-		api_key_field.text = client.api_key
+		# Never mirror the real key into the field: with @tool running, an
+		# open scene would persist it into the .tscn on save.
+		api_key_field.text = ""
+		api_key_field.placeholder_text = "Key set (hidden) — type to replace" if not client.api_key.strip_edges().is_empty() else "Paste API key, sign in with Meta, or set MODEL_API_KEY"
 	if endpoint_field != null:
 		endpoint_field.text = client.api_url
 	if loop_cap_spin != null:
 		loop_cap_spin.value = max_loop_turns
 	_select_model(client.model)
+	_refresh_dirty_dots()
 
 
 # Select model
@@ -1015,10 +1056,12 @@ func _select_model(model_name: String) -> void:
 func _on_settings_saved() -> void:
 	if client == null:
 		return
-	var switching := client.meta_session and api_key_field != null \
-		and api_key_field.text.strip_edges() != client.api_key.strip_edges()
+	var typed_key := ""
 	if api_key_field != null:
-		client.api_key = api_key_field.text.strip_edges()
+		typed_key = api_key_field.text.strip_edges()
+	var switching := client.meta_session and not typed_key.is_empty() and typed_key != client.api_key.strip_edges()
+	if not typed_key.is_empty():
+		client.api_key = typed_key
 	if endpoint_field != null:
 		client.api_url = endpoint_field.text.strip_edges()
 	if model_picker != null and model_picker.selected >= 0:
@@ -1034,6 +1077,142 @@ func _on_settings_saved() -> void:
 	client.save_config()
 	client.load_config()
 	_update_session_status()
+	_sync_settings_fields()
+
+
+# Unsaved-changes popup: leaving the Settings tab with unapplied edits
+# parks the switch behind the popup instead of dropping the edits.
+func _setup_unsaved_popup() -> void:
+	if unsaved_changes_container != null:
+		unsaved_changes_container.visible = false
+	else:
+		push_warning("[GdAI] Unsaved-changes popup export is unassigned.")
+	if save_changes_button != null:
+		save_changes_button.pressed.connect(_on_save_changes_pressed)
+	else:
+		push_warning("[GdAI] Save-changes button export is unassigned.")
+	if exit_without_save_button != null:
+		exit_without_save_button.pressed.connect(_on_exit_without_save_pressed)
+	else:
+		push_warning("[GdAI] Exit-without-save button export is unassigned.")
+
+
+# Gate for tab switches out of Settings. Returns false when the switch must
+# wait behind the popup; the popup buttons complete it via _open_pending_tab.
+func _confirm_leave_settings(target: String) -> bool:
+	if settings_menu == null or not settings_menu.visible:
+		return true
+	if not _settings_have_unsaved_changes():
+		return true
+	if unsaved_changes_container == null:
+		return true # no popup wired; let the switch through
+	_pending_tab = target
+	if settings_button != null:
+		settings_button.button_pressed = true # stay visually on Settings while asking
+	unsaved_changes_container.visible = true
+	return false
+
+
+# Dirty checks compare fields against saved values (no signal tracking,
+# so programmatic syncs can never falsely trip them). Split per field so
+# each setting gets its own indicator dot.
+func _settings_have_unsaved_changes() -> bool:
+	return _api_key_dirty() or _endpoint_dirty() or _model_dirty() or _loop_cap_dirty()
+
+
+func _api_key_dirty() -> bool:
+	if client == null or api_key_field == null:
+		return false
+	return not api_key_field.text.strip_edges().is_empty() # cleared on sync, so any text is unapplied
+
+
+func _endpoint_dirty() -> bool:
+	if client == null or endpoint_field == null:
+		return false
+	return endpoint_field.text.strip_edges() != client.api_url.strip_edges()
+
+
+func _model_dirty() -> bool:
+	if client == null or model_picker == null or model_picker.selected < 0:
+		return false
+	return model_picker.get_item_text(model_picker.selected).strip_edges() != client.model.strip_edges()
+
+
+func _loop_cap_dirty() -> bool:
+	if loop_cap_spin == null:
+		return false
+	return maxi(1, int(loop_cap_spin.value)) != max_loop_turns
+
+
+# Amber-dot indicators, one per setting. The Labels live in the scene tree;
+# styling is applied here so the editor side only positions empty labels.
+func _setup_dirty_dots() -> void:
+	for dot in [api_key_dirty_dot, endpoint_dirty_dot, model_dirty_dot, loop_cap_dirty_dot]:
+		_style_dot(dot)
+	if api_key_dirty_dot == null or endpoint_dirty_dot == null or model_dirty_dot == null or loop_cap_dirty_dot == null:
+		push_warning("[GdAI] One or more dirty-dot exports are unassigned.")
+	if api_key_field != null:
+		api_key_field.text_changed.connect(_refresh_dirty_dots)
+	if endpoint_field != null:
+		endpoint_field.text_changed.connect(_refresh_dirty_dots)
+	if model_picker != null:
+		model_picker.item_selected.connect(_refresh_dirty_dots)
+	if loop_cap_spin != null:
+		loop_cap_spin.value_changed.connect(_refresh_dirty_dots)
+	_refresh_dirty_dots()
+
+
+func _style_dot(dot: Label) -> void:
+	if dot == null:
+		return
+	dot.text = DIRTY_DOT_TEXT
+	dot.add_theme_color_override("font_color", DIRTY_DOT_COLOR)
+	dot.tooltip_text = "Unsaved change"
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dot.visible = false
+
+
+func _refresh_dirty_dots(_changed = null) -> void: # optional arg: field signals each pass 1
+	_set_dot(api_key_dirty_dot, _api_key_dirty())
+	_set_dot(endpoint_dirty_dot, _endpoint_dirty())
+	_set_dot(model_dirty_dot, _model_dirty())
+	_set_dot(loop_cap_dirty_dot, _loop_cap_dirty())
+
+
+func _set_dot(dot: Label, dirty: bool) -> void:
+	if dot == null:
+		return
+	dot.visible = dirty
+
+
+# Popup: same save as the Settings tab, then open the selected tab.
+func _on_save_changes_pressed() -> void:
+	var target := _pending_tab
+	_cancel_pending_tab()
+	_on_settings_saved()
+	_open_pending_tab(target)
+
+
+# Popup: discard edits and just open the selected tab.
+func _on_exit_without_save_pressed() -> void:
+	var target := _pending_tab
+	_cancel_pending_tab()
+	_sync_settings_fields() # revert fields to saved values
+	_open_pending_tab(target)
+
+
+func _cancel_pending_tab() -> void:
+	_pending_tab = ""
+	if unsaved_changes_container != null:
+		unsaved_changes_container.visible = false
+
+
+func _open_pending_tab(target: String) -> void:
+	match target:
+		"chat":
+			_show_chat_tab()
+		"history":
+			_show_history_tab()
 
 
 # Phase 4 step 1: sign-in button + session status. The nodes live in the
@@ -1065,8 +1244,12 @@ func _setup_sign_in_ui() -> void:
 
 # Flow-only nodes (code + browser + cancel) show only mid-sign-in.
 func _set_sign_in_flow_visible(v: bool) -> void:
+	if sign_in_popup != null:
+		sign_in_popup.visible = v
 	if sign_in_code_field != null:
 		sign_in_code_field.visible = v
+		if not v:
+			sign_in_code_field.text = ""
 	if sign_in_open_browser_button != null:
 		sign_in_open_browser_button.visible = v
 	if sign_in_cancel_button != null:
