@@ -26,7 +26,7 @@ extends Control
 @export var api_key_field: LineEdit
 @export var endpoint_field: LineEdit
 @export var model_picker: OptionButton
-@export var effort_picker: OptionButton # reasoning effort; items auto-filled from AiClient.REASONING_EFFORT_OPTIONS when empty
+@export var effort_picker: OptionButton # reasoning effort; items auto-fill from AiClient.REASONING_EFFORT_OPTIONS
 @export var loop_cap_spin: SpinBox
 
 @export_category("Settings Dirty Indicators")
@@ -71,11 +71,11 @@ var client: AiClient
 var pending_ai_message: MessageBox
 var _send_button_text := "Send"
 var _send_button_tooltip := ""
-var auto_execute := false # true = run every turn immediately (testing escape hatch); false = auto-run safe turns, gate destructive ones behind Approve/Reject
-var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base_text, message, row, buttons, history_ref, preamble, capped, generation
+var auto_execute := false # true runs every turn immediately (testing escape hatch); false gates destructive turns behind approval
+var _pending_approval: Dictionary = {} # one outstanding approval card: calls, base text, message, row, buttons, history, preamble, cap, generation
 const DEFAULT_MAX_LOOP_TURNS := 3
 const SETTINGS_MAX_LOOP_TURNS := "plugins/gd_ai/max_loop_turns"
-var max_loop_turns := DEFAULT_MAX_LOOP_TURNS # tool responses per user message before the loop stops continuing (each turn re-sends full context, so this bounds cost); Settings-editable
+var max_loop_turns := DEFAULT_MAX_LOOP_TURNS # tool turns per message before the loop pauses; Settings-editable cost bound
 const MAX_READ_CHARS := 8000 # read_script truncation cap (chars); protects the context window from huge files
 var _loop_active := false
 var _loop_transcript: Array = [] # request-scoped assistant tool pairs + tool results; never stored in chat history
@@ -86,6 +86,7 @@ var _continue_generation := -1 # user-message stamp the live Continue button bel
 var _sign_in_uri := "" # verification URL for the in-flight device flow (step 2)
 var _pending_tab := "" # tab waiting behind the unsaved-changes popup ("chat"/"history"); "" when none
 
+## Initializes dock signals, client, settings, and input state on ready.
 func _ready() -> void:
 	if Engine.is_editor_hint() and get_tree() != null and get_tree().edited_scene_root == self:
 		return # inert preview: this instance is the scene open for editing, not the live dock
@@ -103,9 +104,10 @@ func _ready() -> void:
 	bar.changed.connect(func(): chat_scroll.scroll_vertical = int(bar.max_value))
 
 	new_chat_button.pressed.connect(_on_new_chat_button_pressed)
+	# History entry point; list saved chats behind the tab.
 	_refresh_history_list()
 
-	# Set up ai client
+	# Set up the AI client.
 	client = AiClient.new()
 	add_child(client)
 	client.system_prompt = "You are a helpful assistant inside the Godot editor. Node paths are relative to the edited scene root; use \".\" to target the root itself. You may emit up to 3 actions per response, each fully specified; for longer tasks do the first steps and continue on the next turn. After each action I'll return its result; reply with the next actions until everything is done and verified in the results, then call finish with a short summary."
@@ -114,15 +116,15 @@ func _ready() -> void:
 	client.streaming = true
 	client.stream_updated.connect(_on_ai_stream)
 	client.retry_scheduled.connect(_on_ai_retry)
-	# Declare editor actions; the model may answer with structured calls,
-	# rendered as text until Phase 2 executes them.
-	client.tools = AiClient.default_tools() # Set to [] to use less tokens by not using tools
+	# Declare the editor actions the model may invoke as structured calls.
+	client.tools = AiClient.default_tools() # Set to [] to save tokens by disabling tools.
 	client.tool_calls_received.connect(_on_ai_tool_calls)
 	client.device_code_received.connect(_on_device_code_received)
 	client.sign_in_succeeded.connect(_on_sign_in_succeeded)
 	client.sign_in_failed.connect(_on_sign_in_failed)
 	client.sign_in_cancelled.connect(_on_sign_in_cancelled)
 	client.session_expired.connect(_on_session_expired)
+	# Load saved config, then wire settings, auth, and attach UI.
 	client.load_config()
 	max_loop_turns = _load_loop_cap()
 	_setup_settings_ui()
@@ -143,13 +145,14 @@ func _ready() -> void:
 	_update_input_height.call_deferred()
 
 
-# Signal for chat button press
+# Shows the chat tab unless unsaved settings block the switch.
 func _on_chat_button_pressed() -> void:
 	if not _confirm_leave_settings("chat"):
 		return
 	_show_chat_tab()
 
 
+## Displays the chat menu and hides history and settings menus.
 func _show_chat_tab() -> void:
 	chat_button.button_pressed = true
 	chat_menu.visible = true
@@ -158,29 +161,30 @@ func _show_chat_tab() -> void:
 		settings_menu.visible = false
 
 
-# Signal for user input in TextEdit
+# Refreshes the send button whenever the input text changes.
 func _on_user_input_box_text_changed() -> void:
 	_refresh_send_button()
 
 
-# Cancel stays available while a reply is outstanding, even if the client
-# is no longer busy (stuck bubble), so the UI is always recoverable.
+## Reports whether a reply is outstanding, including a stuck bubble.
 func _can_cancel() -> bool:
 	if client == null:
 		return false
 	return client.busy or pending_ai_message != null
 
 
-# The send button doubles as a cancel button while a request is in flight.
+## Doubles the send button as cancel while a request is in flight.
 func _refresh_send_button() -> void:
 	if send_button == null or user_input_box == null:
 		return
+	# In-flight request turns the button into Cancel.
 	if _can_cancel():
 		send_button.visible = true
 		send_button.disabled = false
 		send_button.text = "Cancel"
 		send_button.tooltip_text = "Cancel the in-flight request (Esc)"
 	else:
+		# Idle state restores the label and shows Send only with text.
 		send_button.text = _send_button_text
 		send_button.tooltip_text = _send_button_tooltip
 		send_button.visible = not user_input_box.text.strip_edges().is_empty()
@@ -188,10 +192,11 @@ func _refresh_send_button() -> void:
 	_update_input_height.call_deferred()
 
 
-# Signal to detect keyboard input in TextEdit
+# Handles input-box keys for attach navigation, cancel, and sending.
 func _on_input_gui_input(event: InputEvent) -> void:
 	if event is InputEventKey \
 			and event.pressed and not event.echo:
+		# Picker open: let it consume navigation and confirm keys first.
 		if _attach_open and _handle_attach_key(event):
 			user_input_box.accept_event()
 			return
@@ -213,20 +218,23 @@ func _on_input_gui_input(event: InputEvent) -> void:
 				_on_send_button_pressed()
 
 
-# Esc cancels an in-flight request when focus is anywhere else inside the dock.
+## Cancels in-flight requests on Escape pressed elsewhere in the dock.
 func _unhandled_key_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo \
 			and event.keycode == KEY_ESCAPE \
 			and _can_cancel():
+		# Only handle Esc when focus sits inside the dock.
 		var focus_owner := get_viewport().gui_get_focus_owner()
 		if focus_owner == null or (focus_owner != self and not is_ancestor_of(focus_owner)):
 			return
+		# Swallow the key and cancel the request.
 		get_viewport().set_input_as_handled()
 		_on_cancel_requested()
 
 
-# Signal to handle send button press
+# Sends the typed message or cancels the in-flight request instead.
 func _on_send_button_pressed() -> void:
+	# Dismiss the picker so its selection can't leak into the send.
 	_hide_attach_popup()
 	if _can_cancel():
 		# The button is in cancel mode while a request is in flight.
@@ -236,10 +244,12 @@ func _on_send_button_pressed() -> void:
 		return
 	if user_input_box == null:
 		return
+	# Ignore empty input.
 	var text := user_input_box.text.strip_edges()
 	if text.is_empty():
 		return
 
+	# Lazily start a chat on the first send.
 	if current_chat.is_empty():
 		current_chat = ChatStore.new_chat()
 	if current_chat.is_empty() or not current_chat.has("messages"):
@@ -248,47 +258,48 @@ func _on_send_button_pressed() -> void:
 	if not history is Array:
 		return
 
+	# Show the bubble, persist it, and reset the input.
 	add_message(text, true)
 	_record_message("user", text)
 	user_input_box.clear()
 	_on_user_input_box_text_changed()
 	user_input_box.grab_focus()
 
-	# @-mentions are parsed here (before the input clears) and cached for the
-	# whole message: every loop turn rebuilds their contents from these paths.
+	# Parse @-mentions before the input clears; each loop turn rebuilds contents from these paths.
 	_pending_attach_paths = _parse_attach_paths(text)
 	_launch_request(history)
 
 
-# Shared send kernel: fresh editor context, fresh loop state, a pending AI
-# message, then the client call. The caller owns history + input-box handling.
+## Starts a fresh loop turn on the given history with a pending bubble.
 func _launch_request(history: Array) -> void:
 	# Fresh editor snapshot for this request (never stored in history).
 	client.context_prompt = _request_context()
+	# Reset loop state and stamp this user message.
 	_loop_active = true
 	_loop_transcript = []
 	_loop_count = 0
 	_loop_generation += 1
+	# Placeholder bubble streams the reply in place.
 	pending_ai_message = add_message("Thinking...", false)
 	print("[GdAI] Sending: stream=%s tools=%d history=%d." % [client.streaming, client.tools.size(), history.size()])
-	# Refresh send visibility/disabled now that a request is about to start.
-	# client.send sets busy=true on success; update again after in case it failed fast.
+	# Refresh send state now and after send in case it failed fast.
 	client.tool_choice = "auto" # first turn: the model may answer or act
 	client.send(history)
 	_on_user_input_box_text_changed()
 
 
-# Cancel the in-flight request at the user's request (cancel button or Esc).
-# Also recovers a stuck bubble when no request is actually active.
+# Cancels the active request or clears a stuck reply bubble.
 func _on_cancel_requested() -> void:
 	if client == null:
 		return
+	# Cancel the live request, or clear a stuck bubble.
 	if client.busy:
 		client.cancel()
 	elif pending_ai_message == null:
 		return
 	else:
 		print("[GdAI] Cleared stuck reply UI (no request was active).")
+	# Mark the bubble cancelled before dropping it.
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Request cancelled.")
 		pending_ai_message.set_copy_visible(true)
@@ -313,21 +324,22 @@ func _on_ai_stream(full_text: String) -> void:
 		pending_ai_message.set_message_text(full_text)
 
 
-# Set ai response message
+# Finalizes the pending bubble with the completed response text.
 func _on_ai_response(text: String) -> void:
+	# Finalize the streaming bubble with the full text.
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(text)
 		pending_ai_message.set_copy_visible(true)
 		_apply_turn_usage()
 	pending_ai_message = null
+	# Persist the reply and close the loop.
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
 	_end_loop() # plain-text reply: the model is done acting
 	_on_user_input_box_text_changed()
 
 
-# Stamp the pending message with the completed turn's token usage (if the
-# endpoint reported any); must run while pending_ai_message is still valid.
+## Stamps token usage onto the pending bubble before it is cleared.
 func _apply_turn_usage() -> void:
 	if pending_ai_message == null or not is_instance_valid(pending_ai_message):
 		return
@@ -336,13 +348,14 @@ func _apply_turn_usage() -> void:
 	pending_ai_message.set_usage(int(client.last_usage.get("prompt_tokens", 0)), int(client.last_usage.get("completion_tokens", 0)))
 
 
-# Structured actions: safe turns auto-run (the loop continues click-free);
-# turns containing a destructive action hold on an Approve/Reject card.
+# Auto-runs safe turns and parks destructive turns behind approval.
 func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
+	# Collect the rendered bubble text line by line.
 	var lines: Array[String] = []
 	if not preamble.strip_edges().is_empty():
 		lines.append(preamble.strip_edges())
 		lines.append("") # blank line between the preamble and the turn body
+	# Pure-finish turns skip the planned-actions section.
 	var all_finish := not calls.is_empty() and calls.all(func(call): return call is Dictionary and str(call.get("name", "")) == "finish")
 	if not all_finish:
 		lines.append("Planned actions:")
@@ -354,13 +367,16 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 					lines.append_array(_script_plan_lines(fname, call.get("arguments", {}), planned_creates))
 				else:
 					lines.append("• %s %s" % [fname, JSON.stringify(call.get("arguments", {}))])
+	# Empty turn ends the loop immediately.
 	if calls.is_empty():
 		_end_loop() # nothing to approve or run; the turn is over
+	# Count this turn against the loop cap.
 	var capped := false
 	if not calls.is_empty():
 		_loop_count += 1
 		capped = _loop_count > max_loop_turns
 	var turn_results: Array = []
+	# Safe turns run now; destructive turns wait for approval.
 	var needs_approval := not auto_execute and not calls.is_empty() and _turn_needs_approval(calls)
 	if not needs_approval and not calls.is_empty():
 		turn_results = execute_tool_calls(calls)
@@ -377,6 +393,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 			lines.append("(Loop limit reached — press Continue to go on.)")
 		if _turn_has_finish(calls) and _turn_has_real_action(calls):
 			lines.append("(The model called finish with other actions — press Continue if more work remains.)")
+	# Approval needs an open scene to act on.
 	if needs_approval:
 		var scene_root := EditorInterface.get_edited_scene_root()
 		if scene_root == null:
@@ -387,12 +404,14 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 			if str(scene_root.scene_file_path).strip_edges().is_empty():
 				lines.append("Note: this scene has never been saved — approving modifies the open scene only; nothing is auto-saved.")
 			lines.append("⏳ Awaiting approval.")
+	# Render the bubble and stamp usage on it.
 	var rendered := "\n".join(lines)
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(rendered)
 		if not needs_approval:
 			pending_ai_message.set_copy_visible(true) # awaiting-approval resolves later
 		_apply_turn_usage()
+	# Persist the turn and keep a handle for the approval outcome.
 	var history_ref = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", rendered)
@@ -403,15 +422,14 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		_show_approval_row(calls, rendered, history_ref, preamble, capped)
 	pending_ai_message = null
 	_on_user_input_box_text_changed()
+	# Auto-run turns feed back into the loop; capped or finish turns offer Continue.
 	if not needs_approval and not calls.is_empty():
 		_after_tool_turn(preamble, calls, turn_results, capped)
 	if (capped or _turn_has_finish(calls)) and not needs_approval and not calls.is_empty() and not _loop_transcript.is_empty():
 		_show_continue_row()
 
 
-# Approval policy: a turn pauses for approval when it deletes a node or
-# writes a script (disk writes are not undoable); everything else runs
-# without clicks.
+## Reports whether a turn deletes a node or writes a script.
 static func _turn_needs_approval(calls: Array) -> bool:
 	for call in calls:
 		if call is Dictionary and _is_destructive_action(str(call.get("name", ""))):
@@ -419,15 +437,14 @@ static func _turn_needs_approval(calls: Array) -> bool:
 	return false
 
 
-# Gated actions: node deletion plus script writes (Phase 5 step 3 — disk
-# writes are NOT undoable, so they preview + approve like deletes).
+## Reports whether an action deletes nodes or writes scripts.
 static func _is_destructive_action(fname: String) -> bool:
 	return fname in ["delete_node", "create_script", "edit_script"]
 
 
-# First pass over a turn's calls: res_path -> content for valid same-turn
-# creates, so edit previews can resolve against planned new files.
+## Maps same-turn script creates so edit previews resolve new files.
 static func _planned_script_creates(calls: Array) -> Dictionary:
+	# Map each valid new-file path to its planned content.
 	var out := {}
 	for call in calls:
 		if not call is Dictionary or str(call.get("name", "")) != "create_script":
@@ -442,14 +459,14 @@ static func _planned_script_creates(calls: Array) -> Dictionary:
 		if content.strip_edges().is_empty():
 			continue
 		var res_path: String = checked["path"]
+		# Skip existing files and duplicate creates.
 		if FileAccess.file_exists(res_path) or out.has(res_path):
 			continue
 		out[res_path] = content
 	return out
 
 
-# Plan-time preview lines for script writes: compact bullet + diff (or a ⚠
-# when the call would fail). Advisory only; execution re-validates.
+## Builds advisory preview lines for a script write without executing.
 static func _script_plan_lines(fname: String, args: Variant, planned_creates: Dictionary) -> Array[String]:
 	if not args is Dictionary:
 		return ["• %s (invalid arguments — execution will report the error)" % fname]
@@ -458,7 +475,9 @@ static func _script_plan_lines(fname: String, args: Variant, planned_creates: Di
 	return _edit_preview_lines(args, planned_creates)
 
 
+## Previews a planned script creation or explains why it would fail.
 static func _create_preview_lines(args: Dictionary, planned_creates: Dictionary) -> Array[String]:
+	# Validate the path before previewing.
 	var checked := AiClient.validate_script_path(str(args.get("path", "")))
 	if not bool(checked.get("ok", false)):
 		return ["• create_script (bad path: %s)" % str(checked.get("error", "bad path"))]
@@ -470,6 +489,7 @@ static func _create_preview_lines(args: Dictionary, planned_creates: Dictionary)
 		return ["• create_script %s\n  ⚠ already exists (won't overwrite)" % res_path]
 	if not planned_creates.has(res_path):
 		return ["• create_script %s\n  ⚠ duplicate create in the same turn (later one fails)" % res_path]
+	# List the new file plus its capped content lines.
 	var out: Array[String] = ["• create_script %s (new file)" % res_path]
 	var all_content := content.split("\n")
 	var shown := 0
@@ -482,7 +502,9 @@ static func _create_preview_lines(args: Dictionary, planned_creates: Dictionary)
 	return out
 
 
+## Previews a planned script edit with context or a failure warning.
 static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -> Array[String]:
+	# Validate the path before previewing.
 	var checked := AiClient.validate_script_path(str(args.get("path", "")))
 	if not bool(checked.get("ok", false)):
 		return ["• edit_script (bad path: %s)" % str(checked.get("error", "bad path"))]
@@ -493,6 +515,7 @@ static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -
 		return ["• edit_script %s\n  ⚠ find text is empty" % res_path]
 	if find == replace:
 		return ["• edit_script %s\n  (no change: find and replace are identical)" % res_path]
+	# Resolve the text to diff against: disk, open buffer, or planned file.
 	var source := ""
 	var planned_note := ""
 	if FileAccess.file_exists(res_path):
@@ -503,17 +526,20 @@ static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -
 		planned_note = " (against planned new file)"
 	else:
 		return ["• edit_script %s\n  ⚠ does not exist (use create_script first)" % res_path]
+	# The find block must match exactly once.
 	var hits := source.count(find)
 	if hits == 0:
 		return ["• edit_script %s\n  ⚠ find text not found in file%s" % [res_path, planned_note]]
 	if hits > 1:
 		return ["• edit_script %s\n  ⚠ find text matches %d blocks — include more surrounding lines" % [res_path, hits]]
+	# Locate the match and check line alignment.
 	var pos := source.find(find)
 	var aligned := (pos == 0 or source[pos - 1] == "\n") \
 		and (pos + find.length() >= source.length() or source[pos + find.length()] == "\n")
 	var out: Array[String] = ["• edit_script %s%s" % [res_path, planned_note]]
 	var find_lines := find.split("\n")
 	var replace_lines := replace.split("\n")
+	# Trim the split artifact from trailing newlines.
 	if find_lines.size() > 0 and find_lines[find_lines.size() - 1].is_empty() and find.ends_with("\n"):
 		find_lines.remove_at(find_lines.size() - 1)
 	if replace.is_empty():
@@ -525,6 +551,7 @@ static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -
 		_append_capped_block(out, find_lines, "- ")
 		_append_capped_block(out, replace_lines, "+ ")
 		return out
+	# Aligned match renders with surrounding context lines.
 	var start_line := source.count("\n", 0, pos) + 1
 	out.append("  @@ line %d (replace %d line(s) with %d)%s" % [start_line, find_lines.size(), replace_lines.size(), planned_note])
 	var all_lines := source.split("\n")
@@ -557,12 +584,14 @@ static func _edit_preview_lines(args: Dictionary, planned_creates: Dictionary) -
 	return out
 
 
-# Appends up to the preview cap with a prefix; stops silently when full.
+## Appends up to the preview cap with a prefix; stops silently when full.
 static func _append_capped_block(out: Array[String], block_lines: PackedStringArray, prefix: String) -> void:
+	# Count preview lines already used.
 	var used := 0
 	for l in out:
 		if l.begins_with("  - ") or l.begins_with("  + ") or (l.begins_with("  ") and not l.begins_with("  @@")):
 			used += 1
+	# Append until the cap, then note truncation.
 	for ln in block_lines:
 		if used >= SCRIPT_PREVIEW_LINES:
 			out.append("  … (preview truncated)")
@@ -571,6 +600,7 @@ static func _append_capped_block(out: Array[String], block_lines: PackedStringAr
 		used += 1
 
 
+## Clips a preview line to display width with an ellipsis.
 static func _preview_clip(ln: String) -> String:
 	var clean := ln.replace("\r", "")
 	if clean.length() > 120:
@@ -578,9 +608,9 @@ static func _preview_clip(ln: String) -> String:
 	return clean
 
 
-# Show Approve/Reject buttons under the planned-actions bubble. Only one card
-# can be pending: a newer plan supersedes (rejects) the older one.
+## Shows the single Approve/Reject card, superseding any pending one.
 func _show_approval_row(calls: Array, base_text: String, history_ref, preamble: String, capped: bool) -> void:
+	# Only one approval card lives at a time.
 	_supersede_pending_approval()
 	var approve_btn := Button.new()
 	approve_btn.text = "Approve"
@@ -593,12 +623,14 @@ func _show_approval_row(calls: Array, base_text: String, history_ref, preamble: 
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Assemble the button row under the bubble.
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(approve_btn)
 	row.add_child(reject_btn)
 	row.add_child(spacer)
 	message_list.add_child(row)
+	# Stash everything Approve/Reject needs.
 	_pending_approval = {
 		"calls": calls, "base_text": base_text, "message": pending_ai_message,
 		"row": row, "approve": approve_btn, "reject": reject_btn, "history_ref": history_ref,
@@ -606,28 +638,32 @@ func _show_approval_row(calls: Array, base_text: String, history_ref, preamble: 
 	}
 
 
+# Executes the pending turn and feeds results back into the loop.
 func _on_approve_pressed() -> void:
 	if _pending_approval.is_empty():
 		return
+	# Take the pending turn so re-clicks no-op.
 	var pending: Dictionary = _pending_approval
 	_pending_approval = {}
 	_lock_approval_buttons(pending, true)
+	# Stale approvals apply but never feed the new loop.
 	var stale := int(pending.get("generation", -1)) != _loop_generation
 	var turn_calls: Array = pending.get("calls", [])
 	var lines: Array[String] = [str(pending.get("base_text", ""))]
 	lines.append("Results:")
+	# Execute and render one line per result.
 	var turn_results := execute_tool_calls(turn_calls)
 	for result in turn_results:
 		var mark := "✓" if bool(result.get("ok", false)) else "✗"
 		lines.append("%s %s: %s" % [mark, str(result.get("name", "?")), str(result.get("message", ""))])
 	if stale:
-		# A newer user message started since this card appeared: apply, but
-		# never feed stale results into the new turn's loop.
+		# Newer request arrived: apply, but never feed stale results into the new loop.
 		lines.append("(Superseded by a newer request — not fed back.)")
 	elif bool(pending.get("capped", false)):
 		lines.append("(Loop limit reached — press Continue to go on.)")
 	if _turn_has_finish(turn_calls) and _turn_has_real_action(turn_calls):
 		lines.append("(The model called finish with other actions — press Continue if more work remains.)")
+	# Save the outcome, then feed fresh results back into the loop.
 	_update_pending_record(pending, "\n".join(lines))
 	_on_user_input_box_text_changed()
 	if not stale:
@@ -636,9 +672,11 @@ func _on_approve_pressed() -> void:
 		_show_continue_row()
 
 
+# Discards the pending turn without changing the scene.
 func _on_reject_pressed() -> void:
 	if _pending_approval.is_empty():
 		return
+	# Take the pending turn so re-clicks no-op.
 	var pending: Dictionary = _pending_approval
 	_pending_approval = {}
 	_lock_approval_buttons(pending, false)
@@ -647,12 +685,11 @@ func _on_reject_pressed() -> void:
 	_on_user_input_box_text_changed()
 
 
-# Multi-turn tool loop: after a turn's calls execute, record the assistant
-# tool pair plus per-call results as real tool messages and re-send, so the
-# model observes outcomes and keeps going until it answers with plain text.
+## Records tool results and re-sends so the loop continues or halts.
 func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bool) -> void:
 	if not _loop_active:
 		return
+	# Record the turn for the next model request.
 	_append_loop_transcript(preamble, calls, results)
 	if _turn_has_finish(calls) and not _turn_has_real_action(calls) and not capped:
 		_end_loop() # pure finish within budget: clean done state
@@ -663,6 +700,7 @@ func _after_tool_turn(preamble: String, calls: Array, results: Array, capped: bo
 	_continue_loop()
 
 
+## Reports whether a turn contains a finish call.
 static func _turn_has_finish(calls: Array) -> bool:
 	for call in calls:
 		if call is Dictionary and str(call.get("name", "")) == "finish":
@@ -670,6 +708,7 @@ static func _turn_has_finish(calls: Array) -> bool:
 	return false
 
 
+## Reports whether a turn contains any non-finish action.
 static func _turn_has_real_action(calls: Array) -> bool:
 	for call in calls:
 		if call is Dictionary and str(call.get("name", "")) != "finish":
@@ -677,7 +716,9 @@ static func _turn_has_real_action(calls: Array) -> bool:
 	return false
 
 
+## Appends assistant tool calls plus results to the loop transcript.
 func _append_loop_transcript(preamble: String, calls: Array, results: Array) -> void:
+	# Shape the calls into the API tool-call format.
 	var tool_calls: Array = []
 	for call in calls:
 		if not call is Dictionary:
@@ -692,6 +733,7 @@ func _append_loop_transcript(preamble: String, calls: Array, results: Array) -> 
 		})
 	if tool_calls.is_empty():
 		return
+	# Store the assistant turn, then one tool message per result.
 	_loop_transcript.append({"role": "assistant", "content": preamble, "tool_calls": tool_calls})
 	var pair_count: int = mini(calls.size(), results.size())
 	for i in pair_count:
@@ -709,6 +751,7 @@ func _append_loop_transcript(preamble: String, calls: Array, results: Array) -> 
 		})
 
 
+## Re-sends history plus transcript to continue the tool loop.
 func _continue_loop() -> void:
 	if not _loop_active or client == null or client.busy:
 		return
@@ -720,14 +763,17 @@ func _continue_loop() -> void:
 		_end_loop()
 		return
 	# (send_followup selects required vs stepped-down auto.)
+	# Fresh snapshot plus a new placeholder bubble for this turn.
 	client.context_prompt = _request_context()
 	pending_ai_message = add_message("Thinking…", false)
+	# Send history plus transcript as the followup.
 	var followup := history.duplicate()
 	followup.append_array(_loop_transcript)
 	client.send_followup(followup)
 	_on_user_input_box_text_changed()
 
 
+## Clears loop state and restores the default tool choice.
 func _end_loop() -> void:
 	_loop_active = false
 	_loop_transcript = []
@@ -736,15 +782,14 @@ func _end_loop() -> void:
 		client.tool_choice = "auto"
 
 
-# Capped halt: auto-continuation stops but the transcript is kept, so a manual
-# Continue resumes with full state. Cleared by the next send or a hard end.
+## Halts auto-continuation while keeping the transcript for manual Continue.
 func _pause_loop() -> void:
 	_loop_active = false
 
 
-# Offer a one-shot Continue button under the capped turn's bubble. Only one
-# can be live: showing a new one retires the older.
+## Offers a one-shot Continue button, retiring any older one.
 func _show_continue_row() -> void:
+	# Only one Continue button lives at a time.
 	_retire_continue_button()
 	var btn := Button.new()
 	btn.text = "Continue"
@@ -753,6 +798,7 @@ func _show_continue_row() -> void:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Assemble the button row under the bubble.
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(btn)
@@ -762,6 +808,7 @@ func _show_continue_row() -> void:
 	_continue_generation = _loop_generation
 
 
+## Disables and clears the live Continue button if present.
 func _retire_continue_button() -> void:
 	if _continue_button != null and is_instance_valid(_continue_button):
 		_continue_button.disabled = true
@@ -769,9 +816,11 @@ func _retire_continue_button() -> void:
 	_continue_button = null
 
 
+# Resumes a paused loop for another batch of tool turns.
 func _on_continue_pressed() -> void:
 	if _continue_button == null or not is_instance_valid(_continue_button):
 		return
+	# Older generations retire instead of resuming.
 	if _continue_generation != _loop_generation:
 		_retire_continue_button()
 		return
@@ -781,21 +830,26 @@ func _on_continue_pressed() -> void:
 	_continue_button = null
 	btn.disabled = true
 	btn.text = "Continuing…"
+	# Reactivate the loop with a fresh turn budget.
 	_loop_active = true
 	_loop_count = 0
 	_continue_loop()
 
 
+## Treats the pending approval as rejected by a newer request.
 func _supersede_pending_approval() -> void:
 	if _pending_approval.is_empty():
 		return
+	# Take the pending turn so re-clicks no-op.
 	var pending: Dictionary = _pending_approval
 	_pending_approval = {}
 	_lock_approval_buttons(pending, false)
 	_update_pending_record(pending, str(pending.get("base_text", "")) + "\nSuperseded by a newer request — treated as rejected.")
 
 
+## Disables approval buttons and labels the chosen outcome.
 func _lock_approval_buttons(pending: Dictionary, approved: bool) -> void:
+	# Freeze both buttons and label the chosen outcome.
 	var approve_btn = pending.get("approve")
 	if approve_btn != null and is_instance_valid(approve_btn):
 		approve_btn.disabled = true
@@ -808,11 +862,14 @@ func _lock_approval_buttons(pending: Dictionary, approved: bool) -> void:
 			reject_btn.text = "Rejected"
 
 
+## Writes final approval text to the bubble and saved history.
 func _update_pending_record(pending: Dictionary, full_text: String) -> void:
+	# Rewrite the bubble with the final text.
 	var message = pending.get("message")
 	if message != null and is_instance_valid(message):
 		message.set_message_text(full_text)
 		message.set_copy_visible(true) # approve/reject/supersede are terminal
+	# Mirror the outcome into saved history.
 	var history_ref = pending.get("history_ref")
 	if history_ref is Dictionary:
 		history_ref["content"] = full_text
@@ -820,8 +877,9 @@ func _update_pending_record(pending: Dictionary, full_text: String) -> void:
 			ChatStore.save_chat(current_chat)
 
 
-# Handle error on ai message
+# Shows the failure message in the pending bubble and ends the loop.
 func _on_ai_error(message: String) -> void:
+	# Show the failure in the pending bubble.
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text("Error: " + message)
 		pending_ai_message.set_copy_visible(true)
@@ -832,7 +890,7 @@ func _on_ai_error(message: String) -> void:
 	_on_user_input_box_text_changed()
 
 
-# Helper function to create a message box
+## Creates a chat bubble row and wires its delete and retry signals.
 func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox:
 	var message: MessageBox = MESSAGE_BOX_SCENE.instantiate()
 	message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -867,9 +925,9 @@ func add_message(text: String, is_user: bool, copy_ready := false) -> MessageBox
 	return message
 
 
-# Delete one bubble: drop its UI row plus its history entry (UI order matches
-# history order; both append chronologically, approval/continue rows skipped).
+# Deletes one bubble and its matching history entry by order.
 func _on_message_delete_requested(message: MessageBox) -> void:
+	# Locate the bubble before freeing its row.
 	var idx := _message_ui_index(message)
 	var parent := message.get_parent()
 	if parent != null and parent != message_list and parent.get_parent() == message_list:
@@ -880,6 +938,7 @@ func _on_message_delete_requested(message: MessageBox) -> void:
 		message.queue_free()
 	else:
 		return
+	# Drop the matching history entry and save.
 	if idx < 0 or current_chat.is_empty():
 		return
 	var messages = current_chat.get("messages", [])
@@ -889,7 +948,9 @@ func _on_message_delete_requested(message: MessageBox) -> void:
 	_update_retry_visibility() # a delete can move the last-AI target
 
 
+## Finds a bubble's history index, skipping approval and continue rows.
 func _message_ui_index(message: MessageBox) -> int:
+	# Walk display rows counting only message bubbles.
 	var i := 0
 	for child in message_list.get_children():
 		var box: MessageBox = null
@@ -908,8 +969,7 @@ func _message_ui_index(message: MessageBox) -> int:
 	return -1
 
 
-# AI messages sit directly under message_list; user bubbles are wrapped in
-# HBox rows, and approval/continue rows hold no MessageBox at all.
+## Lists AI message bubbles in display order, newest last.
 func _ai_messages_in_order() -> Array:
 	var boxes: Array = []
 	if message_list == null:
@@ -920,16 +980,16 @@ func _ai_messages_in_order() -> Array:
 	return boxes
 
 
-# Only the last AI message offers retry (mirrors the newest-turn replay rule).
+## Offers retry only on the last AI message bubble.
 func _update_retry_visibility() -> void:
 	var boxes := _ai_messages_in_order()
 	for i in boxes.size():
 		(boxes[i] as MessageBox).set_retry_last(i == boxes.size() - 1)
 
 
-# Retry = regenerate the last response: drop its bubble + history entry, then
-# re-run the surviving newest user turn through the normal send kernel.
+# Regenerates the last response through the newest surviving user turn.
 func _on_message_retry_requested(message: MessageBox) -> void:
+	# Only retry when idle; mid-request has nothing final to redo.
 	if client == null or client.busy or _loop_active:
 		return # mid-request (incl. between tool turns): nothing final to redo
 	if message.get_parent() != message_list:
@@ -939,9 +999,7 @@ func _on_message_retry_requested(message: MessageBox) -> void:
 	var history: Array = current_chat["messages"]
 	if not history is Array:
 		return
-	# The target must be the last history entry and an assistant one, preceded
-	# by its user turn; retrying an older turn (history truncation) is out of
-	# scope, so stale presses simply no-op.
+	# Target must be the last entry (assistant after user); older or stale targets no-op.
 	var idx := _message_ui_index(message)
 	if idx < 1 or idx != history.size() - 1:
 		return
@@ -951,13 +1009,13 @@ func _on_message_retry_requested(message: MessageBox) -> void:
 	var prev = history[idx - 1]
 	if not prev is Dictionary or str(prev.get("role", "")) != "user":
 		return
-	# A retry starts a brand-new turn: any live approval/continue for the old
-	# one is retired first, exactly like a superseding send.
+	# Retry starts a new turn: retire live approval/continue first, like a superseding send.
 	if not _pending_approval.is_empty():
 		_supersede_pending_approval()
 	_retire_continue_button()
 	history.remove_at(idx)
 	ChatStore.save_chat(current_chat)
+	# Free the old bubble, then re-send from the surviving history.
 	pending_ai_message = null
 	message_list.remove_child(message)
 	message.queue_free()
@@ -965,9 +1023,11 @@ func _on_message_retry_requested(message: MessageBox) -> void:
 	_launch_request(history) # re-inits loop state, Thinking bubble, send
 
 
+## Resizes the input box to its content up to the line cap.
 func _update_input_height() -> void:
 	if user_input_box == null:
 		return
+	# Size the box from its line count plus stylebox padding.
 	var lines := clampi(user_input_box.get_total_visible_line_count(), 1, MAX_LINES)
 	var line_h := user_input_box.get_line_height() \
 		+ user_input_box.get_theme_constant("line_spacing")
@@ -975,13 +1035,14 @@ func _update_input_height() -> void:
 	user_input_box.custom_minimum_size.y = lines * line_h + padding
 
 
-# Signal for history button press
+# Shows the history tab unless unsaved settings block the switch.
 func _on_history_button_pressed() -> void:
 	if not _confirm_leave_settings("history"):
 		return
 	_show_history_tab()
 
 
+## Displays the history menu and refreshes the saved chat list.
 func _show_history_tab() -> void:
 	history_button.button_pressed = true
 	history_menu.visible = true
@@ -992,7 +1053,7 @@ func _show_history_tab() -> void:
 	_refresh_history_list()
 
 
-# Append to the current chat and write it to disk
+## Appends a message to the current chat and saves it.
 func _record_message(role: String, content: String) -> void:
 	if current_chat.is_empty() or not current_chat.has("messages"):
 		return
@@ -1000,23 +1061,25 @@ func _record_message(role: String, content: String) -> void:
 	if not messages is Array:
 		return
 	messages.append({"role": role, "content": content})
+	# Title the chat from its first user message.
 	if role == "user" and str(current_chat.get("title", "")) == "New chat":
 		current_chat["title"] = _make_title(content)
 	ChatStore.save_chat(current_chat)
 
 
-# Make title for chat in history
-# Snapshot of editor state for the next request. Never stored in chat history.
+## Snapshots the scene, selection, and script for the next request only.
 func _build_editor_context() -> String:
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
 		return "[Editor context]\nNo scene is currently open in the editor."
+	# Collect the snapshot line by line.
 	var lines: Array[String] = []
 	lines.append("[Editor context]")
 	var scene_path := root.scene_file_path
 	if scene_path.is_empty():
 		scene_path = "(unsaved scene)"
 	lines.append("Scene: %s (root: %s, %s)" % [scene_path, root.name, root.get_class()])
+	# Note multi-scene sessions and the capped selection list.
 	var open_scenes = EditorInterface.get_open_scenes()
 	if open_scenes.size() > 1:
 		lines.append("Open scenes: %d" % open_scenes.size())
@@ -1032,6 +1095,7 @@ func _build_editor_context() -> String:
 		lines.append("Selected: %s" % ", ".join(shown))
 	lines.append("Paths are relative to the scene root; use \".\" for the root itself.")
 	lines.append("Tree:")
+	# Depth-first walk of the tree within node and depth budgets.
 	var shown_count := 0
 	var truncated := false
 	var saw_container := false
@@ -1052,6 +1116,7 @@ func _build_editor_context() -> String:
 		var children := node.get_children()
 		for i in range(children.size() - 1, -1, -1):
 			stack.append([children[i], depth + 1])
+	# Flag truncation and container layout rules.
 	if truncated:
 		lines.append("… (tree truncated to %d nodes, depth %d)" % [TREE_NODE_BUDGET, TREE_DEPTH_BUDGET])
 	if saw_container:
@@ -1062,8 +1127,7 @@ func _build_editor_context() -> String:
 	return "\n".join(lines)
 
 
-# Current Script-editor buffer for context injection: path + live text
-# (unsaved edits included), capped. "" when no script is open.
+## Renders the live open-script buffer, capped, for request context.
 static func _open_script_block() -> String:
 	var script_editor := EditorInterface.get_script_editor()
 	if script_editor == null:
@@ -1071,6 +1135,7 @@ static func _open_script_block() -> String:
 	var sc: Script = script_editor.get_current_script()
 	if sc == null:
 		return ""
+	# Prefer the live buffer so unsaved edits are included.
 	var text := ""
 	var ed = script_editor.get_current_editor()
 	if ed != null and ed.has_method("get_base_editor"):
@@ -1082,6 +1147,7 @@ static func _open_script_block() -> String:
 	var path := str(sc.resource_path)
 	if path.is_empty():
 		path = "(unsaved script)"
+	# Cap the excerpt, pointing at read_script for the rest.
 	var total_lines := text.split("\n").size() if not text.is_empty() else 0
 	var shown := text
 	var tail := ""
@@ -1106,15 +1172,16 @@ var _attach_cache: Array[String] = [] # res:// scan, valid only while the picker
 var _pending_attach_paths: Array[String] = [] # parsed from the sent text; contents rebuilt every loop turn
 
 
-# Per-turn context: fresh editor snapshot plus the sent message's @-attached
-# files (rebuilt every turn, so loop turns see live buffer edits).
+## Combines fresh editor context with rebuilt attachment contents.
 func _request_context() -> String:
 	return _build_editor_context() + _attach_block_for(_pending_attach_paths)
 
 
+## Builds the @-mention picker popup and wires its signals.
 func _setup_attach_ui() -> void:
 	if user_input_box == null:
 		return
+	# Build the floating picker popup and its layout.
 	_attach_popup = PopupPanel.new()
 	_attach_popup.size = Vector2i(440, 260)
 	var margin := MarginContainer.new()
@@ -1131,6 +1198,7 @@ func _setup_attach_ui() -> void:
 	hint.text = "Attach a script or scene (@)"
 	hint.add_theme_color_override("font_color", Color(0.6, 0.6, 0.62))
 	vbox.add_child(hint)
+	# Candidate list fills the popup; wire pick and close signals.
 	_attach_list = ItemList.new()
 	_attach_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(_attach_list)
@@ -1141,9 +1209,11 @@ func _setup_attach_ui() -> void:
 	user_input_box.text_changed.connect(_on_attach_text_changed)
 
 
+# Opens or closes the attach picker as @-queries change.
 func _on_attach_text_changed() -> void:
 	if user_input_box == null or _attach_popup == null:
 		return
+	# Show the picker only while the caret sits on an @-query.
 	var found: Array = _attach_query_at_caret()
 	if int(found[0]) < 0:
 		_hide_attach_popup()
@@ -1151,9 +1221,9 @@ func _on_attach_text_changed() -> void:
 	_show_attach_popup(str(found[1]))
 
 
-# [at_col, query]: the @-word under the caret on its line, or [-1, ""].
-# A mid-word @ (email) never opens the picker; a trailing space closes it.
+## Extracts the @-query under the caret, ignoring emails and spaces.
 func _attach_query_at_caret() -> Array:
+	# No input means no query.
 	if user_input_box == null:
 		return [-1, ""]
 	var line := user_input_box.get_caret_line()
@@ -1161,6 +1231,7 @@ func _attach_query_at_caret() -> Array:
 	if line < 0 or line >= user_input_box.get_line_count():
 		return [-1, ""]
 	var before := user_input_box.get_line(line).left(col)
+	# Find the nearest @ and reject mid-word hits like emails.
 	var at := before.rfind("@")
 	if at < 0:
 		return [-1, ""]
@@ -1174,9 +1245,12 @@ func _attach_query_at_caret() -> Array:
 	return [at, query]
 
 
+## Shows filtered attach candidates above or below the input.
 func _show_attach_popup(query: String) -> void:
+	# Scan once per opening, then filter the cache per keystroke.
 	if not _attach_open:
 		_attach_cache = _scan_attach_files() # fresh scan per opening; filters reuse it
+	# Filter the cache and fill the list up to the cap.
 	var matches := _filter_attach_files(_attach_cache, query)
 	_attach_list.clear()
 	var shown := 0
@@ -1191,6 +1265,7 @@ func _show_attach_popup(query: String) -> void:
 	_attach_list.set_block_signals(true) # programmatic select must not attach
 	_attach_list.select(0)
 	_attach_list.set_block_signals(false)
+	# Anchor the popup above the input, or below when cramped.
 	var r := user_input_box.get_global_rect()
 	var size := Vector2i(440, 260)
 	var pos := Vector2i(int(r.position.x), int(r.position.y) - size.y - 6)
@@ -1200,6 +1275,7 @@ func _show_attach_popup(query: String) -> void:
 	_attach_popup.popup(Rect2i(pos, size))
 
 
+# Closes the attach picker and clears its cached scan.
 func _hide_attach_popup() -> void:
 	_attach_open = false
 	_attach_cache = []
@@ -1207,6 +1283,7 @@ func _hide_attach_popup() -> void:
 		_attach_popup.hide()
 
 
+# Inserts the picked file path at the caret's @-word.
 func _on_attach_item_chosen(index: int) -> void:
 	if not _attach_open or _attach_list == null or user_input_box == null:
 		return
@@ -1215,13 +1292,13 @@ func _on_attach_item_chosen(index: int) -> void:
 	_insert_attach_path(_attach_list.get_item_text(index))
 
 
-# Replace the @-word under the caret with the picked path plus a space (the
-# trailing space closes the picker via the normal text-changed path).
+## Replaces the @-word with the path plus a closing space.
 func _insert_attach_path(path: String) -> void:
 	var found: Array = _attach_query_at_caret()
 	if int(found[0]) < 0:
 		_hide_attach_popup()
 		return
+	# Swap the @-word for the picked path.
 	var line := user_input_box.get_caret_line()
 	var col := user_input_box.get_caret_column()
 	user_input_box.remove_text(line, int(found[0]), line, col)
@@ -1232,9 +1309,9 @@ func _insert_attach_path(path: String) -> void:
 	user_input_box.grab_focus()
 
 
-# Picker key handling; true when the key was consumed. Enter attaches the
-# selection (top match when nothing is selected) instead of sending.
+## Consumes picker keys so Enter attaches instead of sending.
 func _handle_attach_key(event: InputEventKey) -> bool:
+	# Esc closes, Enter attaches, arrows move the selection.
 	match event.keycode:
 		KEY_ESCAPE:
 			_hide_attach_popup()
@@ -1258,9 +1335,9 @@ func _handle_attach_key(event: InputEventKey) -> bool:
 	return false
 
 
-# All attachable files under res://, sorted. Dot-dirs (.godot, .git, ..) are
-# skipped; the cap bounds keystroke scans on huge projects.
+## Lists attachable scripts and scenes under res://, sorted and capped.
 func _scan_attach_files() -> Array[String]:
+	# Walk res:// collecting scripts and scenes up to the cap.
 	var out: Array[String] = []
 	var stack: Array[String] = ["res://"]
 	while not stack.is_empty() and out.size() < ATTACH_SCAN_CAP:
@@ -1270,6 +1347,7 @@ func _scan_attach_files() -> Array[String]:
 			continue
 		dir.list_dir_begin()
 		var entry := dir.get_next()
+		# Recurse into visible dirs; collect scripts and scenes.
 		while entry != "" and out.size() < ATTACH_SCAN_CAP:
 			var full: String = dir_path.path_join(entry)
 			if dir.current_is_dir():
@@ -1285,6 +1363,7 @@ func _scan_attach_files() -> Array[String]:
 	return out
 
 
+## Filters attach candidates by a case-insensitive query substring.
 static func _filter_attach_files(files: Array[String], query: String) -> Array[String]:
 	var q := query.strip_edges().to_lower()
 	if q.is_empty():
@@ -1296,10 +1375,9 @@ static func _filter_attach_files(files: Array[String], query: String) -> Array[S
 	return out
 
 
-# @res:// paths out of sent text: validated, existing, deduped, in order.
-# Everything else (@john, emails, bad extensions, missing files) stays plain
-# text and simply attaches nothing.
+## Extracts valid existing @res:// paths, skipping all other @-text.
 static func _parse_attach_paths(text: String) -> Array[String]:
+	# Find @res:// hits and trim trailing punctuation.
 	var out: Array[String] = []
 	var re := RegEx.new()
 	re.compile("@(res://\\S+)")
@@ -1307,6 +1385,7 @@ static func _parse_attach_paths(text: String) -> Array[String]:
 		var cand := str(m.get_string(1))
 		while not cand.is_empty() and ".,;:!?)]\"'`".contains(cand.right(1)):
 			cand = cand.left(cand.length() - 1)
+		# Keep only valid, existing, deduplicated paths.
 		var checked := AiClient.validate_attach_path(cand)
 		if not bool(checked.get("ok", false)):
 			continue
@@ -1320,12 +1399,11 @@ static func _parse_attach_paths(text: String) -> Array[String]:
 	return out
 
 
-# The sent message's attachments as a context block ("" when none). Scripts
-# prefer the live Script-editor buffer; the open script is already injected
-# above, so it gets a pointer instead of a second copy.
+## Formats attachments from live buffers, pointing at the open script.
 func _attach_block_for(paths: Array[String]) -> String:
 	if paths.is_empty():
 		return ""
+	# Skip re-sending the file already shown as the open script.
 	var open_path := _current_script_path()
 	var parts: Array[String] = ["", "[Attached files]"]
 	var shown := 0
@@ -1342,12 +1420,14 @@ func _attach_block_for(paths: Array[String]) -> String:
 			shown += 1
 			continue
 		var content := FileAccess.get_file_as_string(p)
+		# Scripts prefer the live buffer so unsaved edits are included.
 		var source := "disk"
 		if p.to_lower().ends_with(".gd"):
 			var buf := _open_buffer_for(p)
 			if bool(buf.get("open", false)):
 				content = str(buf.get("text", ""))
 				source = "live buffer"
+		# Cap content to the read budget.
 		var lines := content.count("\n") + 1 if not content.is_empty() else 0
 		var tail := ""
 		if content.length() > MAX_READ_CHARS:
@@ -1358,6 +1438,7 @@ func _attach_block_for(paths: Array[String]) -> String:
 	return "\n".join(parts)
 
 
+## Returns the open script's path or empty when none.
 static func _current_script_path() -> String:
 	if not Engine.is_editor_hint():
 		return ""
@@ -1370,6 +1451,7 @@ static func _current_script_path() -> String:
 	return str(cur.resource_path)
 
 
+## Finds a node by bare name only when uniquely matched.
 static func _find_unique_named(root: Node, node_name: String):
 	var matches := root.find_children(node_name, "", true, true)
 	if matches.size() == 1:
@@ -1377,6 +1459,7 @@ static func _find_unique_named(root: Node, node_name: String):
 	return null
 
 
+## Formats a node path relative to the scene root.
 func _scene_rel_path(root: Node, node: Node) -> String:
 	if node == root:
 		return "."
@@ -1388,12 +1471,14 @@ func _scene_rel_path(root: Node, node: Node) -> String:
 const MODEL_OPTIONS := ["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.2", "muse-spark-1.1"]
 
 
-# Set up settings UI
+## Wires settings controls and fills model and effort options.
 func _setup_settings_ui() -> void:
+	# Wire the settings button, warning when the export is missing.
 	if settings_button != null:
 		settings_button.pressed.connect(_on_settings_button_pressed)
 	else:
 		push_warning("[GdAI] Settings button export is unassigned.")
+	# Fill empty pickers from the built-in option lists.
 	if model_picker != null and model_picker.item_count == 0:
 		for option in MODEL_OPTIONS:
 			model_picker.add_item(option)
@@ -1408,12 +1493,13 @@ func _setup_settings_ui() -> void:
 		push_warning("[GdAI] Settings menu export is unassigned.")
 	if api_key_field == null or endpoint_field == null or model_picker == null or effort_picker == null or loop_cap_spin == null:
 		push_warning("[GdAI] One or more settings field exports are unassigned.")
+	# Mask the key field, then show saved values.
 	if api_key_field != null:
 		api_key_field.secret = true
 	_sync_settings_fields()
 
 
-# Loop cap persistence (dock-side setting, EditorSettings like the rest).
+## Loads the saved loop cap, defaulting when unset or invalid.
 static func _load_loop_cap() -> int:
 	if not Engine.is_editor_hint():
 		return DEFAULT_MAX_LOOP_TURNS
@@ -1423,7 +1509,7 @@ static func _load_loop_cap() -> int:
 	return DEFAULT_MAX_LOOP_TURNS
 
 
-# Handle settings button press
+# Shows the settings tab while preserving any unsaved edits.
 func _on_settings_button_pressed() -> void:
 	_cancel_pending_tab() # staying on Settings answers the popup: drop any pending switch
 	if settings_menu != null and settings_menu.visible:
@@ -1439,16 +1525,17 @@ func _on_settings_button_pressed() -> void:
 	settings_menu.visible = true
 	chat_menu.visible = false
 	history_menu.visible = false
+	# Show the tab with saved values.
 	_sync_settings_fields()
 
 
-# Sync setting fields
+## Refreshes settings fields from saved values without exposing the key.
 func _sync_settings_fields() -> void:
 	if client == null:
 		return
+	# Key field never shows the real value, only a placeholder hint.
 	if api_key_field != null:
-		# Never mirror the real key into the field: with @tool running, an
-		# open scene would persist it into the .tscn on save.
+		# Never mirror the real key here: @tool would persist it into an open .tscn on save.
 		api_key_field.text = ""
 		api_key_field.placeholder_text = "Key set (hidden) — type to replace" if not client.api_key.strip_edges().is_empty() else "Paste API key, sign in with Meta, or set MODEL_API_KEY"
 	if endpoint_field != null:
@@ -1460,15 +1547,17 @@ func _sync_settings_fields() -> void:
 	_refresh_dirty_dots()
 
 
-# Select model
+## Selects the saved model, adding unknown names as new rows.
 func _select_model(model_name: String) -> void:
 	if model_picker == null:
 		return
+	# Match the saved name against existing rows.
 	var idx := -1
 	for i in model_picker.item_count:
 		if model_picker.get_item_text(i) == model_name:
 			idx = i
 			break
+	# Unknown saved names join the list as new rows.
 	if idx == -1 and not model_name.strip_edges().is_empty():
 		model_picker.add_item(model_name.strip_edges())
 		idx = model_picker.item_count - 1
@@ -1476,11 +1565,11 @@ func _select_model(model_name: String) -> void:
 		model_picker.select(idx)
 
 
-# Select effort; closed set, so an unknown value falls back to the default
-# item instead of adding a bogus row the endpoint would reject.
+## Selects the saved effort, falling back on unknown values.
 func _select_effort(effort: String) -> void:
 	if effort_picker == null:
 		return
+	# Normalize the saved value, falling back on unknown text.
 	var want := effort.strip_edges().to_lower()
 	if not want in AiClient.REASONING_EFFORT_OPTIONS:
 		want = AiClient.DEFAULT_REASONING_EFFORT
@@ -1490,10 +1579,11 @@ func _select_effort(effort: String) -> void:
 			return
 
 
-# Save settings
+# Saves settings fields and reloads the client configuration.
 func _on_settings_saved() -> void:
 	if client == null:
 		return
+	# Empty key field keeps the saved key; typed text replaces it.
 	var typed_key := ""
 	if api_key_field != null:
 		typed_key = api_key_field.text.strip_edges()
@@ -1502,6 +1592,7 @@ func _on_settings_saved() -> void:
 		client.api_key = typed_key
 	if endpoint_field != null:
 		client.api_url = endpoint_field.text.strip_edges()
+	# Apply the picked model and effort when valid.
 	if model_picker != null and model_picker.selected >= 0:
 		var picked := model_picker.get_item_text(model_picker.selected).strip_edges()
 		if not picked.is_empty():
@@ -1510,6 +1601,7 @@ func _on_settings_saved() -> void:
 		var effort := effort_picker.get_item_text(effort_picker.selected).strip_edges().to_lower()
 		if effort in AiClient.REASONING_EFFORT_OPTIONS:
 			client.reasoning_effort = effort
+	# Clamp the loop cap and persist it to editor settings.
 	if loop_cap_spin != null:
 		max_loop_turns = maxi(1, int(loop_cap_spin.value))
 		if Engine.is_editor_hint():
@@ -1522,8 +1614,7 @@ func _on_settings_saved() -> void:
 	_sync_settings_fields()
 
 
-# Unsaved-changes popup: leaving the Settings tab with unapplied edits
-# parks the switch behind the popup instead of dropping the edits.
+## Wires the unsaved-changes popup and its two buttons.
 func _setup_unsaved_popup() -> void:
 	if unsaved_changes_container != null:
 		unsaved_changes_container.visible = false
@@ -1539,9 +1630,9 @@ func _setup_unsaved_popup() -> void:
 		push_warning("[GdAI] Exit-without-save button export is unassigned.")
 
 
-# Gate for tab switches out of Settings. Returns false when the switch must
-# wait behind the popup; the popup buttons complete it via _open_pending_tab.
+## Parks tab switches behind the popup when edits are unsaved.
 func _confirm_leave_settings(target: String) -> bool:
+	# Leave freely when Settings is hidden or clean.
 	if settings_menu == null or not settings_menu.visible:
 		return true
 	if not _settings_have_unsaved_changes():
@@ -1555,46 +1646,49 @@ func _confirm_leave_settings(target: String) -> bool:
 	return false
 
 
-# Dirty checks compare fields against saved values (no signal tracking,
-# so programmatic syncs can never falsely trip them). Split per field so
-# each setting gets its own indicator dot.
+## Reports whether any settings field differs from saved values.
 func _settings_have_unsaved_changes() -> bool:
 	return _api_key_dirty() or _endpoint_dirty() or _model_dirty() or _effort_dirty() or _loop_cap_dirty()
 
 
+## Reports whether a replacement API key awaits saving.
 func _api_key_dirty() -> bool:
 	if client == null or api_key_field == null:
 		return false
 	return not api_key_field.text.strip_edges().is_empty() # cleared on sync, so any text is unapplied
 
 
+## Reports whether the endpoint field differs from the saved value.
 func _endpoint_dirty() -> bool:
 	if client == null or endpoint_field == null:
 		return false
 	return endpoint_field.text.strip_edges() != client.api_url.strip_edges()
 
 
+## Reports whether the picked model differs from the saved value.
 func _model_dirty() -> bool:
 	if client == null or model_picker == null or model_picker.selected < 0:
 		return false
 	return model_picker.get_item_text(model_picker.selected).strip_edges() != client.model.strip_edges()
 
 
+## Reports whether the picked effort differs from the saved value.
 func _effort_dirty() -> bool:
 	if client == null or effort_picker == null or effort_picker.selected < 0:
 		return false
 	return effort_picker.get_item_text(effort_picker.selected).strip_edges().to_lower() != client.reasoning_effort.strip_edges().to_lower()
 
 
+## Reports whether the loop cap differs from the saved value.
 func _loop_cap_dirty() -> bool:
 	if loop_cap_spin == null:
 		return false
 	return maxi(1, int(loop_cap_spin.value)) != max_loop_turns
 
 
-# Amber-dot indicators, one per setting. The Labels live in the scene tree;
-# styling is applied here so the editor side only positions empty labels.
+## Styles dirty dots and wires fields to refresh them.
 func _setup_dirty_dots() -> void:
+	# Style every indicator before wiring field signals.
 	for dot in [api_key_dirty_dot, endpoint_dirty_dot, model_dirty_dot, effort_dirty_dot, loop_cap_dirty_dot]:
 		_style_dot(dot)
 	if api_key_dirty_dot == null or endpoint_dirty_dot == null or model_dirty_dot == null or effort_dirty_dot == null or loop_cap_dirty_dot == null:
@@ -1612,6 +1706,7 @@ func _setup_dirty_dots() -> void:
 	_refresh_dirty_dots()
 
 
+## Styles one dirty indicator dot and hides it initially.
 func _style_dot(dot: Label) -> void:
 	if dot == null:
 		return
@@ -1622,6 +1717,7 @@ func _style_dot(dot: Label) -> void:
 	dot.visible = false
 
 
+# Refreshes every dirty dot from current field values.
 func _refresh_dirty_dots(_changed = null) -> void: # optional arg: field signals each pass 1
 	_set_dot(api_key_dirty_dot, _api_key_dirty())
 	_set_dot(endpoint_dirty_dot, _endpoint_dirty())
@@ -1630,13 +1726,14 @@ func _refresh_dirty_dots(_changed = null) -> void: # optional arg: field signals
 	_set_dot(loop_cap_dirty_dot, _loop_cap_dirty())
 
 
+## Shows or hides one dirty dot by its dirty flag.
 func _set_dot(dot: Label, dirty: bool) -> void:
 	if dot == null:
 		return
 	dot.visible = dirty
 
 
-# Popup: same save as the Settings tab, then open the selected tab.
+# Saves settings, then opens the tab parked behind the popup.
 func _on_save_changes_pressed() -> void:
 	var target := _pending_tab
 	_cancel_pending_tab()
@@ -1644,7 +1741,7 @@ func _on_save_changes_pressed() -> void:
 	_open_pending_tab(target)
 
 
-# Popup: discard edits and just open the selected tab.
+# Discards settings edits, then opens the parked tab.
 func _on_exit_without_save_pressed() -> void:
 	var target := _pending_tab
 	_cancel_pending_tab()
@@ -1652,12 +1749,14 @@ func _on_exit_without_save_pressed() -> void:
 	_open_pending_tab(target)
 
 
+## Drops the parked tab switch and hides the popup.
 func _cancel_pending_tab() -> void:
 	_pending_tab = ""
 	if unsaved_changes_container != null:
 		unsaved_changes_container.visible = false
 
 
+## Shows the chat or history tab parked behind the popup.
 func _open_pending_tab(target: String) -> void:
 	match target:
 		"chat":
@@ -1666,9 +1765,7 @@ func _open_pending_tab(target: String) -> void:
 			_show_history_tab()
 
 
-# Phase 4 step 1: sign-in button + session status. The nodes live in the
-# scene tree; these exports are wired in the editor. Everything is
-# null-guarded so the dock runs before the nodes exist.
+## Wires sign-in controls while tolerating unassigned scene nodes.
 func _setup_sign_in_ui() -> void:
 	if sign_in_button != null:
 		sign_in_button.pressed.connect(_on_sign_in_button_pressed)
@@ -1693,7 +1790,7 @@ func _setup_sign_in_ui() -> void:
 	_set_sign_in_flow_visible(false)
 
 
-# Flow-only nodes (code + browser + cancel) show only mid-sign-in.
+## Shows flow-only sign-in nodes during an active sign-in.
 func _set_sign_in_flow_visible(v: bool) -> void:
 	if sign_in_popup != null:
 		sign_in_popup.visible = v
@@ -1707,10 +1804,11 @@ func _set_sign_in_flow_visible(v: bool) -> void:
 		sign_in_cancel_button.visible = v
 
 
-# Step 2: start the OAuth device flow; the code arrives via signal.
+# Starts the device sign-in flow and awaits the code signal.
 func _on_sign_in_button_pressed() -> void:
 	if client == null or client.sign_in_active:
 		return
+	# Reset flow state and lock the button while contacting Meta.
 	_sign_in_uri = ""
 	_set_sign_in_flow_visible(false)
 	if sign_in_button != null:
@@ -1720,7 +1818,9 @@ func _on_sign_in_button_pressed() -> void:
 	client.begin_device_sign_in()
 
 
+# Displays the device code and verification instructions for approval.
 func _on_device_code_received(user_code: String, verification_uri: String, verification_uri_complete: String, _expires_in: int) -> void:
+	# Prefer the complete URL, then show the code for approval.
 	_sign_in_uri = verification_uri_complete if not verification_uri_complete.is_empty() else verification_uri
 	if sign_in_code_field != null:
 		sign_in_code_field.text = user_code
@@ -1730,16 +1830,19 @@ func _on_device_code_received(user_code: String, verification_uri: String, verif
 		session_status_label.text = "Enter code %s at %s (or press Open browser), then approve." % [user_code, verification_uri]
 
 
+# Opens the verification URL for the in-flight sign-in.
 func _on_sign_in_open_browser_pressed() -> void:
 	if not _sign_in_uri.is_empty():
 		OS.shell_open(_sign_in_uri)
 
 
+# Cancels the in-flight device sign-in flow on request.
 func _on_sign_in_cancel_pressed() -> void:
 	if client != null:
 		client.cancel_device_sign_in()
 
 
+# Restores auth UI after a successful Meta sign-in.
 func _on_sign_in_succeeded() -> void:
 	_sign_in_uri = ""
 	_update_auth_buttons()
@@ -1750,6 +1853,7 @@ func _on_sign_in_succeeded() -> void:
 		session_status_label.text = "Signed in with Meta."
 
 
+# Restores auth UI and reports the sign-in failure reason.
 func _on_sign_in_failed(message: String) -> void:
 	_sign_in_uri = ""
 	_set_sign_in_flow_visible(false)
@@ -1759,6 +1863,7 @@ func _on_sign_in_failed(message: String) -> void:
 		session_status_label.text = "Sign-in failed: %s" % message
 
 
+# Restores auth UI after the sign-in is cancelled.
 func _on_sign_in_cancelled() -> void:
 	_sign_in_uri = ""
 	_set_sign_in_flow_visible(false)
@@ -1767,7 +1872,7 @@ func _on_sign_in_cancelled() -> void:
 	_update_session_status()
 
 
-# Step 4: one stacked button slot shows sign-in or sign-out by session.
+## Swaps the stacked sign-in and sign-out buttons by session.
 func _update_auth_buttons() -> void:
 	var signed_in := client != null and client.meta_session
 	if sign_in_button != null:
@@ -1776,9 +1881,11 @@ func _update_auth_buttons() -> void:
 		sign_out_button.visible = signed_in
 
 
+# Clears the session and credentials, then refreshes auth UI.
 func _on_sign_out_button_pressed() -> void:
 	if client == null:
 		return
+	# Stop any in-flight flow, then wipe session and key.
 	if client.sign_in_active:
 		client.cancel_device_sign_in()
 	client.clear_session()
@@ -1788,17 +1895,18 @@ func _on_sign_out_button_pressed() -> void:
 	_update_session_status()
 
 
+# Refreshes auth UI and surfaces session expiry as an error.
 func _on_session_expired() -> void:
 	_update_session_status() # session already cleared; flips status + buttons
 	_on_ai_error("Meta session expired — press Sign in to sign in again.")
 
 
-# Session status from current auth state. Buttons update here too so every
-# status refresh keeps the sign-in/sign-out slot correct.
+## Renders session status and keeps auth buttons in sync.
 func _update_session_status() -> void:
 	_update_auth_buttons()
 	if session_status_label == null:
 		return
+	# Report which credential source is active.
 	if client == null or client.api_key.strip_edges().is_empty():
 		session_status_label.text = "Signed out — no API key configured."
 		return
@@ -1811,11 +1919,9 @@ func _update_session_status() -> void:
 		session_status_label.text = "API key loaded from editor settings."
 
 
-# Set title
-# Phase 2 execution: runs validated tool calls through the Editor API so every
-# change is a separate undoable action. Continues past failures.
-# Returns per-call {"name", "ok", "message"} dicts.
+## Runs validated tool calls as undoable actions, continuing past failures.
 func execute_tool_calls(calls: Array) -> Array:
+	# Run each call in order, recording failures inline.
 	var results: Array = []
 	for call in calls:
 		if not call is Dictionary:
@@ -1825,7 +1931,9 @@ func execute_tool_calls(calls: Array) -> Array:
 	return results
 
 
+## Re-validates one tool call, then dispatches it to its operation.
 func _execute_tool_call(call: Dictionary) -> Dictionary:
+	# Reject malformed calls before touching the scene.
 	var fname := str(call.get("name", ""))
 	var args = call.get("arguments", {})
 	if client == null:
@@ -1839,6 +1947,7 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 	var editable_problem := _check_targets_editable(fname, args)
 	if not editable_problem.is_empty():
 		return {"name": fname, "ok": false, "message": editable_problem}
+	# Dispatch to the matching operation.
 	var outcome := {"ok": false, "message": "unknown action '%s'" % fname}
 	match fname:
 		"create_node":
@@ -1863,22 +1972,14 @@ func _execute_tool_call(call: Dictionary) -> Dictionary:
 			outcome = _op_edit_script(args)
 		"finish":
 			outcome = _op_finish(args)
+	# Shape the outcome, carrying detail for the model transcript.
 	var final := {"name": fname, "ok": bool(outcome.get("ok", false)), "message": str(outcome.get("message", ""))}
 	if outcome is Dictionary and outcome.has("detail"):
 		final["detail"] = outcome["detail"] # full payload for the model's tool transcript; chat shows message only
 	return final
 
 
-# Live editor selection snapshot for undo-restore. Tree-transition ops manage
-# selection inside their UndoRedo action because the editor resolves selection
-# to scene paths on refresh: a selected node that leaves the tree errors with
-# "no path can be resolved". (Undo methods execute in registration order.)
-# Ordering rule: sel.clear first, structural ops in the middle, selection
-# restore last — selection never references a mid-flight node. remove_child
-# also nulls owner recursively (probe-verified), so every add_child pairs
-# with set_owner (saved owner, else the scene root, healing broken nodes.)
-# Exception: create-undo reseats selection BEFORE removal, since the node
-# stays orphaned — every follower must release it before it leaves the tree.
+## Snapshots live selection for undo, always cleared first and restored last.
 static func _selection_snapshot() -> Array:
 	var out: Array = []
 	for sel_node in EditorInterface.get_selection().get_selected_nodes():
@@ -1887,15 +1988,12 @@ static func _selection_snapshot() -> Array:
 	return out
 
 
-# Per-action edit gate: locked nodes and nodes inside an uneditable instance
-# are skipped instead of modified. Returns "" when ok. Mirrors the Scene
-# dock: editability comes from each enclosing instance's Editable Children
-# flag, not from owner (instance children stay owned by their instance root
-# either way — verified headlessly against Node.is_editable_instance).
+## Skips targets inside locked nodes or uneditable instances with a reason.
 func _check_targets_editable(fname: String, args: Dictionary) -> String:
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
 		return "" # each op reports "no scene is open" itself
+	# Collect the node paths this action would touch.
 	var targets: Array[String] = []
 	match fname:
 		"create_node":
@@ -1908,6 +2006,7 @@ func _check_targets_editable(fname: String, args: Dictionary) -> String:
 			targets.append(str(args.get("node", "")))
 		_:
 			return ""
+	# Reject locked nodes and uneditable instance interiors.
 	for target in targets:
 		var resolved := _resolve_scene_node(target)
 		if resolved["node"] == null:
@@ -1921,11 +2020,9 @@ func _check_targets_editable(fname: String, args: Dictionary) -> String:
 	return ""
 
 
-# Nearest ancestor that roots an instance (it carries a scene_file_path)
-# whose Editable Children flag is off; null when fully editable. The walk
-# stops below the edited root, and the target itself is never examined, so
-# instance roots (local, owned nodes) stay editable like in the dock.
+## Finds the nearest uneditable instance ancestor above a node.
 static func _enclosing_uneditable_instance(root: Node, node: Node) -> Node:
+	# Climb parents looking for a locked instance root.
 	var at := node.get_parent()
 	while at != null and root.is_ancestor_of(at):
 		if not str(at.scene_file_path).strip_edges().is_empty() and not root.is_editable_instance(at):
@@ -1934,32 +2031,37 @@ static func _enclosing_uneditable_instance(root: Node, node: Node) -> Node:
 	return null
 
 
-# Resolves a scene-relative (or absolute) path to a node in the edited scene.
-# Returns {"node": Node or null, "error": String}.
+## Resolves a scene-relative path to its edited-scene node.
 func _resolve_scene_node(path_str: String) -> Dictionary:
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
 		return {"node": null, "error": "no scene is open"}
+	# Empty or dot addresses the scene root itself.
 	var clean := path_str.strip_edges()
 	if clean.is_empty() or clean == ".":
 		return {"node": root, "error": ""}
 	var node := root.get_node_or_null(NodePath(clean))
+	# Fall back to root-name and unique bare-name matches.
 	if node == null and (clean == root.name or clean == root.scene_file_path.get_file().get_basename()):
 		node = root
 	if node == null and clean.find("/") == -1:
 		node = _find_unique_named(root, clean)
 	if node == null:
 		return {"node": null, "error": "node not found: '%s'" % clean}
+	# Reject nodes outside the edited scene.
 	if node != root and not root.is_ancestor_of(node):
 		return {"node": null, "error": "node '%s' is outside the edited scene" % clean}
 	return {"node": node, "error": ""}
 
 
+## Strips unsafe characters from a proposed node name.
 static func _sanitize_node_name(base: String) -> String:
 	return base.strip_edges().replace("/", "_").replace(":", "_")
 
 
+## Derives a sibling-unique child name from a base name.
 static func _unique_child_name(parent: Node, base: String) -> String:
+	# Default empty names, then suffix until free.
 	var clean := base.strip_edges()
 	if clean.is_empty():
 		clean = "Node"
@@ -1971,6 +2073,7 @@ static func _unique_child_name(parent: Node, base: String) -> String:
 	return "%s%d" % [clean, i]
 
 
+## Reports whether a node exposes the named property.
 static func _has_property(node: Node, prop: String) -> bool:
 	for p in node.get_property_list():
 		if p is Dictionary and str(p.get("name", "")) == prop:
@@ -1978,6 +2081,7 @@ static func _has_property(node: Node, prop: String) -> bool:
 	return false
 
 
+## Formats a value briefly for result messages with clipping.
 static func _short_value(value: Variant) -> String:
 	var text := str(value)
 	if value is String:
@@ -1987,9 +2091,11 @@ static func _short_value(value: Variant) -> String:
 	return text
 
 
+## Coerces a JSON value into a fixed-count float array.
 static func _to_float_array(value: Variant, count: int) -> Array:
 	if not value is Array or value.size() != count:
 		return []
+	# Coerce each element, bailing on the first non-number.
 	var out: Array = []
 	for v in value:
 		if v is float or (v is int and not (v is bool)):
@@ -2001,11 +2107,11 @@ static func _to_float_array(value: Variant, count: int) -> Array:
 	return out
 
 
-# Coerces a JSON value to the type the property currently holds.
-# Returns {"value": ..., "error": ""} (error non-empty on failure).
+## Coerces a JSON value to match the current property type.
 static func _coerce_to_like(current: Variant, value: Variant) -> Dictionary:
 	if current == null or value == null:
 		return {"value": value, "error": ""}
+	# Booleans accept true/false strings too.
 	if current is bool:
 		if value is bool:
 			return {"value": value, "error": ""}
@@ -2028,12 +2134,14 @@ static func _coerce_to_like(current: Variant, value: Variant) -> Dictionary:
 		if value is String:
 			return {"value": value, "error": ""}
 		return {"value": null, "error": "must be a string"}
+	# Objects can't round-trip through JSON values.
 	if current is Object:
 		return {"value": null, "error": "resource/object properties are not supported yet"}
 	if current is Array and value is Array:
 		return {"value": value, "error": ""}
 	if current is Dictionary and value is Dictionary:
 		return {"value": value, "error": ""}
+	# Map math types to their expected component count.
 	var want := ""
 	var count := 0
 	if current is Vector2:
@@ -2088,7 +2196,9 @@ static func _coerce_to_like(current: Variant, value: Variant) -> Dictionary:
 			return {"value": Rect2(nums[0], nums[1], nums[2], nums[3]), "error": ""}
 
 
+## Creates a node under its parent as one undoable action.
 func _op_create_node(args: Dictionary) -> Dictionary:
+	# Reject unknown or non-Node types before touching the scene.
 	var node_type := str(args.get("node_type", "")).strip_edges()
 	if node_type.is_empty():
 		return {"ok": false, "message": "missing node_type"}
@@ -2097,6 +2207,7 @@ func _op_create_node(args: Dictionary) -> Dictionary:
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
 		return {"ok": false, "message": "no scene is open"}
+	# Default to the root; resolve an explicit parent when given.
 	var parent := root
 	var parent_path := str(args.get("parent", "")).strip_edges()
 	if not parent_path.is_empty() and parent_path != ".":
@@ -2111,6 +2222,7 @@ func _op_create_node(args: Dictionary) -> Dictionary:
 	var node := ClassDB.instantiate(node_type) as Node
 	if node == null:
 		return {"ok": false, "message": "could not instantiate '%s'" % node_type}
+	# Build the undoable add with ownership and selection.
 	node.name = final_name
 	var is_control := node is Control
 	var sel := EditorInterface.get_selection()
@@ -2125,20 +2237,22 @@ func _op_create_node(args: Dictionary) -> Dictionary:
 	undo_redo.add_do_method(sel, "clear")
 	undo_redo.add_do_method(sel, "add_node", node)
 	undo_redo.add_do_reference(node)
-	# Reseat selection onto live nodes BEFORE removal so no editor view that
-	# follows selection (inspector) still references the node on tree-exit.
+	# Reseat selection onto live nodes before removal so no inspector view references the node on tree-exit.
 	undo_redo.add_undo_method(sel, "clear")
 	for sel_node in sel_before:
 		undo_redo.add_undo_method(sel, "add_node", sel_node)
 		undo_redo.add_undo_reference(sel_node)
 	undo_redo.add_undo_method(parent, "remove_child", node)
 	undo_redo.commit_action()
+	# Verify the add applied before reporting success.
 	if node.get_parent() != parent or not node.is_inside_tree():
 		return {"ok": false, "message": "create failed to apply under '%s'" % _scene_rel_path(root, parent)}
 	return {"ok": true, "message": "created %s '%s' under '%s'" % [node_type, final_name, _scene_rel_path(root, parent)]}
 
 
+## Deletes a node as one undoable action preserving owners.
 func _op_delete_node(args: Dictionary) -> Dictionary:
+	# Resolve the target; the root itself is never deletable.
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
 		return {"ok": false, "message": str(resolved["error"])}
@@ -2149,6 +2263,7 @@ func _op_delete_node(args: Dictionary) -> Dictionary:
 	var parent := node.get_parent()
 	if parent == null:
 		return {"ok": false, "message": "node has no parent"}
+	# Snapshot owners so undo restores the subtree exactly.
 	var label := "%s '%s'" % [node.get_class(), node.name]
 	var old_owner: Node = node.owner
 	var heal_owner: Node = old_owner if old_owner != null else root
@@ -2160,9 +2275,7 @@ func _op_delete_node(args: Dictionary) -> Dictionary:
 	var sel_before := _selection_snapshot()
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Delete Node")
-	# History anchor: the manager routes the action to the history of its
-	# FIRST method's target, so lead with a scene object (leading with the
-	# global selection misroutes scene methods with "history mismatch").
+	# History anchor: lead with a scene object, or the global selection misroutes with "history mismatch".
 	undo_redo.add_do_method(node, "set_owner", heal_owner)
 	undo_redo.add_do_method(sel, "remove_node", node)
 	undo_redo.add_do_method(parent, "remove_child", node)
@@ -2177,15 +2290,18 @@ func _op_delete_node(args: Dictionary) -> Dictionary:
 		undo_redo.add_undo_method(sel, "add_node", sel_node)
 		undo_redo.add_undo_reference(sel_node)
 	undo_redo.commit_action()
+	# Verify the removal applied before reporting success.
 	if node.is_inside_tree() or node.get_parent() != null:
 		return {"ok": false, "message": "delete failed to apply on '%s'" % node.name}
 	return {"ok": true, "message": "deleted %s" % label}
 
 
+## Renames a node as one undoable action unless duplicated.
 func _op_rename_node(args: Dictionary) -> Dictionary:
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
 		return {"ok": false, "message": str(resolved["error"])}
+	# Sanitize the name and reject sibling collisions.
 	var node: Node = resolved["node"]
 	var new_name := _sanitize_node_name(str(args.get("name", "")))
 	if new_name.is_empty():
@@ -2196,6 +2312,7 @@ func _op_rename_node(args: Dictionary) -> Dictionary:
 	var old_name := node.name
 	if old_name == new_name:
 		return {"ok": true, "message": "already named '%s'" % new_name}
+	# Apply the rename as one undoable step.
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Rename Node")
 	undo_redo.add_do_property(node, "name", new_name)
@@ -2204,7 +2321,9 @@ func _op_rename_node(args: Dictionary) -> Dictionary:
 	return {"ok": true, "message": "renamed '%s' to '%s'" % [old_name, new_name]}
 
 
+## Moves a node to a new parent as one undoable action.
 func _op_reparent_node(args: Dictionary) -> Dictionary:
+	# Resolve the node; the root itself can never move.
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
 		return {"ok": false, "message": str(resolved["error"])}
@@ -2215,6 +2334,7 @@ func _op_reparent_node(args: Dictionary) -> Dictionary:
 	var presolved := _resolve_scene_node(str(args.get("new_parent", "")))
 	if presolved["node"] == null:
 		return {"ok": false, "message": "new parent %s" % str(presolved["error"])}
+	# Reject cycles and no-op moves onto the same parent.
 	var new_parent: Node = presolved["node"]
 	if new_parent == node or node.is_ancestor_of(new_parent):
 		return {"ok": false, "message": "cannot reparent inside itself"}
@@ -2223,6 +2343,7 @@ func _op_reparent_node(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "node has no parent"}
 	if old_parent == new_parent:
 		return {"ok": true, "message": "already under '%s'" % _scene_rel_path(root, new_parent)}
+	# Snapshot owners so undo restores the subtree exactly.
 	var old_owner: Node = node.owner
 	var heal_owner: Node = old_owner if old_owner != null else root
 	var sub_owners: Array = []
@@ -2233,9 +2354,7 @@ func _op_reparent_node(args: Dictionary) -> Dictionary:
 	var sel_before := _selection_snapshot()
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Reparent Node")
-	# History anchor (see Delete Node): first method must target a scene
-	# object. Asserts owner pre-move; the post-add set_owner still does the
-	# real restore since remove_child nulls owner.
+	# History anchor: first method targets a scene object; post-add set_owner restores since remove_child nulls owner.
 	undo_redo.add_do_method(node, "set_owner", heal_owner)
 	undo_redo.add_do_method(sel, "clear")
 	undo_redo.add_do_method(old_parent, "remove_child", node)
@@ -2256,12 +2375,15 @@ func _op_reparent_node(args: Dictionary) -> Dictionary:
 		undo_redo.add_undo_method(sel, "add_node", sel_node)
 		undo_redo.add_undo_reference(sel_node)
 	undo_redo.commit_action()
+	# Verify the move applied before reporting success.
 	if node.get_parent() != new_parent or not node.is_inside_tree() or node.owner == null:
 		return {"ok": false, "message": "reparent failed to apply under '%s'" % _scene_rel_path(root, new_parent)}
 	return {"ok": true, "message": "moved '%s' under '%s'" % [node.name, _scene_rel_path(root, new_parent)]}
 
 
+## Sets a coerced property value as one undoable action.
 func _op_set_property(args: Dictionary) -> Dictionary:
+	# Resolve the node and confirm the property exists.
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
 		return {"ok": false, "message": str(resolved["error"])}
@@ -2271,6 +2393,7 @@ func _op_set_property(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "property name is empty"}
 	if not _has_property(node, prop):
 		return {"ok": false, "message": "'%s' has no property '%s'" % [node.name, prop]}
+	# Coerce the JSON value to the property's type.
 	var coerced := _coerce_to_like(node.get(prop), args.get("value"))
 	if not str(coerced.get("error", "")).is_empty():
 		return {"ok": false, "message": "property '%s' %s" % [prop, str(coerced["error"])]}
@@ -2283,7 +2406,9 @@ func _op_set_property(args: Dictionary) -> Dictionary:
 	return {"ok": true, "message": "set %s.%s = %s" % [node.name, prop, _short_value(coerced["value"])]}
 
 
+## Attaches a script to a scriptless node as one undoable action.
 func _op_attach_script(args: Dictionary) -> Dictionary:
+	# Resolve the node and confirm the script loads.
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
 		return {"ok": false, "message": str(resolved["error"])}
@@ -2307,6 +2432,7 @@ func _op_attach_script(args: Dictionary) -> Dictionary:
 	return {"ok": true, "message": "attached '%s' to '%s'" % [script_path, node.name]}
 
 
+## Maps a preset name to its Control anchor constant.
 static func _anchors_preset_value(preset_name: String) -> int:
 	var presets := {
 		"top_left": Control.PRESET_TOP_LEFT,
@@ -2329,10 +2455,9 @@ static func _anchors_preset_value(preset_name: String) -> int:
 	return int(presets.get(preset_name.to_lower(), -1))
 
 
+## Maps a preset name to its horizontal and vertical grow directions.
 static func _preset_grow_directions(preset_name: String) -> Array:
-	# Verified empirically on 4.6: grow = direction the rect extends from its
-	# anchor position on min-size overflow, so overflow always extends into
-	# the parent (fresh-control defaults END,END are the top_left case).
+	# Grow = overflow direction from the anchor (verified on 4.6); overflow always extends into the parent.
 	var growers := {
 		"top_left": [Control.GROW_DIRECTION_END, Control.GROW_DIRECTION_END],
 		"top_right": [Control.GROW_DIRECTION_BEGIN, Control.GROW_DIRECTION_END],
@@ -2354,7 +2479,9 @@ static func _preset_grow_directions(preset_name: String) -> Array:
 	return growers.get(preset_name.to_lower(), [Control.GROW_DIRECTION_BOTH, Control.GROW_DIRECTION_BOTH])
 
 
+## Creates a new script file without overwriting existing files.
 func _op_create_script(args: Dictionary) -> Dictionary:
+	# Validate the path and reject empty or existing files.
 	var checked := AiClient.validate_script_path(str(args.get("path", "")))
 	if not bool(checked.get("ok", false)):
 		return {"ok": false, "message": str(checked.get("error", "bad path"))}
@@ -2364,6 +2491,7 @@ func _op_create_script(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "script content is empty"}
 	if FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' already exists (won't overwrite)" % res_path}
+	# Ensure the folder exists, then write and verify the file.
 	var dir_err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(res_path.get_base_dir()))
 	if dir_err != OK:
 		return {"ok": false, "message": "could not create folder '%s' (error %d)" % [res_path.get_base_dir(), dir_err]}
@@ -2377,18 +2505,22 @@ func _op_create_script(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	# Rescan so the new file appears in the editor.
 	if Engine.is_editor_hint():
 		EditorInterface.get_resource_filesystem().scan()
 	return {"ok": true, "message": "created script '%s' (%d bytes; verified on disk, not undoable)" % [res_path, content.to_utf8_buffer().size()]}
 
 
+## Reads a script for the model, preferring its live buffer.
 func _op_read_script(args: Dictionary) -> Dictionary:
+	# Validate the path and confirm the file exists.
 	var checked := AiClient.validate_script_path(str(args.get("path", "")))
 	if not bool(checked.get("ok", false)):
 		return {"ok": false, "message": str(checked.get("error", "bad path"))}
 	var res_path: String = checked["path"]
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' does not exist" % res_path}
+	# Prefer the live buffer, then truncate to the read cap.
 	var content := FileAccess.get_file_as_string(res_path)
 	var notes: Array[String] = []
 	var buf := _open_buffer_for(res_path)
@@ -2407,13 +2539,16 @@ func _op_read_script(args: Dictionary) -> Dictionary:
 	return {"ok": true, "message": "read '%s' (%d bytes, %d lines%s; content sent to model)" % [res_path, content.to_utf8_buffer().size(), line_count, note], "detail": content}
 
 
+## Replaces one matched block in a script and verifies disk.
 func _op_edit_script(args: Dictionary) -> Dictionary:
+	# Validate the path and confirm the file exists.
 	var checked := AiClient.validate_script_path(str(args.get("path", "")))
 	if not bool(checked.get("ok", false)):
 		return {"ok": false, "message": str(checked.get("error", "bad path"))}
 	var res_path: String = checked["path"]
 	if not FileAccess.file_exists(res_path):
 		return {"ok": false, "message": "'%s' does not exist (use create_script first)" % res_path}
+	# Edit from the live buffer when open, else from disk.
 	var buf := _open_buffer_for(res_path)
 	var buf_open := bool(buf.get("open", false))
 	var source_text := str(buf.get("text", "")) if buf_open else FileAccess.get_file_as_string(res_path)
@@ -2432,15 +2567,15 @@ func _op_edit_script(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "failed writing '%s' (error %d)" % [res_path, write_err]}
 	if FileAccess.get_file_as_string(res_path) != str(edited.get("content", "")):
 		return {"ok": false, "message": "write could not be verified on disk for '%s'" % res_path}
+	# Sync the open editor, then report success.
 	_reload_script_in_editor(res_path, str(edited.get("content", "")))
 	var src_note := " from live buffer" if buf_open else ""
 	return {"ok": true, "message": "edited '%s' (1 block replaced%s; verified on disk, not undoable)" % [res_path, src_note]}
 
 
-# Best-effort refresh after a disk write, so open views show the new
-# content without a restart: the live Script-editor buffer when the edited
-# file is current, the compiled resource, and a filesystem notice. Guarded.
+## Refreshes open editor views after a script disk write.
 static func _reload_script_in_editor(res_path: String, new_text: String) -> void:
+	# Push the new text into the open editor and filesystem cache.
 	if Engine.is_editor_hint():
 		var script_editor := EditorInterface.get_script_editor()
 		if script_editor != null:
@@ -2454,15 +2589,16 @@ static func _reload_script_in_editor(res_path: String, new_text: String) -> void
 		var fs := EditorInterface.get_resource_filesystem()
 		if fs != null and fs.has_method("update_file"):
 			fs.call("update_file", res_path)
+	# Reload the resource so runtime state matches disk.
 	if ResourceLoader.exists(res_path):
 		var res := ResourceLoader.load(res_path)
 		if res != null and res.has_method("reload"):
 			res.call("reload")
 
 
-# Live buffer text for res_path when it is the current Script-editor file,
-# so reads/edits see unsaved changes. Returns {"open": bool, "text": String}.
+## Reads live buffer text when a script is open in the editor.
 static func _open_buffer_for(res_path: String) -> Dictionary:
+	# Default to closed; only the current script can match.
 	var out := {"open": false, "text": ""}
 	if not Engine.is_editor_hint():
 		return out
@@ -2481,6 +2617,7 @@ static func _open_buffer_for(res_path: String) -> Dictionary:
 	return out
 
 
+## Returns the model's summary as the turn's final result.
 func _op_finish(args: Dictionary) -> Dictionary:
 	var summary := str(args.get("summary", "")).strip_edges()
 	if summary.is_empty():
@@ -2488,7 +2625,9 @@ func _op_finish(args: Dictionary) -> Dictionary:
 	return {"ok": true, "message": summary}
 
 
+## Applies an anchors preset to a Control as one undoable action.
 func _op_set_anchors_preset(args: Dictionary) -> Dictionary:
+	# Resolve the node and confirm it is a Control.
 	var resolved := _resolve_scene_node(str(args.get("node", "")))
 	if resolved["node"] == null:
 		return {"ok": false, "message": str(resolved["error"])}
@@ -2501,6 +2640,7 @@ func _op_set_anchors_preset(args: Dictionary) -> Dictionary:
 		return {"ok": false, "message": "unknown anchors preset '%s'" % preset_name}
 	var keep_offsets := bool(args.get("keep_offsets", false))
 	var grow: Array = _preset_grow_directions(preset_name)
+	# Warn when the parent overrides or starves anchors.
 	var note := ""
 	var layout_parent := node.get_parent()
 	if layout_parent != null and layout_parent is Container:
@@ -2509,13 +2649,11 @@ func _op_set_anchors_preset(args: Dictionary) -> Dictionary:
 		var psize: Vector2 = layout_parent.size
 		if psize.x < 1.0 or psize.y < 1.0:
 			note = " (parent '%s' is %dx%d — anchors are relative to it, so size the parent first, e.g. full_rect on the parent, then re-run)" % [layout_parent.name, int(psize.x), int(psize.y)]
+	# Apply preset plus grow directions as one undoable step.
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Set Anchors Preset")
 	undo_redo.add_do_property(node, "layout_mode", LAYOUT_MODE_ANCHORS)
-	# Probe-verified (4.6.3): plain set_anchors_preset leaves offsets numerically,
-	# so center lands the top-left corner at parent-center and full_rect overflows
-	# the parent. set_anchors_and_offsets_preset KEEP_SIZE matches the editor
-	# Layout menu exactly (true center keeping size, true fill for full_rect).
+	# Probe-verified (4.6.3): plain set_anchors_preset misplaces center/full_rect; KEEP_SIZE matches the editor Layout menu.
 	if keep_offsets:
 		undo_redo.add_do_method(node, "set_anchors_preset", preset, true)
 	else:
@@ -2528,23 +2666,27 @@ func _op_set_anchors_preset(args: Dictionary) -> Dictionary:
 	return {"ok": true, "message": "set anchors preset '%s' on '%s'%s" % [preset_name, node.name, note]}
 
 
+## Derives a short chat title from the first message line.
 func _make_title(text: String) -> String:
 	var line := text.split("\n")[0].strip_edges()
 	return line if line.length() <= 40 else line.substr(0, 40) + "…"
 
 
-# Clear message list
+## Frees all message rows and dismisses any pending approval.
 func _clear_message_list() -> void:
 	_continue_button = null # rows (and the button) are freed below
+	# Dismiss any pending approval without applying.
 	if not _pending_approval.is_empty():
 		var pending: Dictionary = _pending_approval
 		_pending_approval = {}
 		_update_pending_record(pending, str(pending.get("base_text", "")) + "\nDismissed (chat cleared) — no changes applied.")
+	# Free every message row.
 	for child in message_list.get_children():
 		message_list.remove_child(child)
 		child.queue_free()
 
 
+## Cancels any active request and clears loop state.
 func _cancel_pending_request() -> void:
 	if client != null and client.busy:
 		client.cancel()
@@ -2552,7 +2694,7 @@ func _cancel_pending_request() -> void:
 	_end_loop()
 
 
-# Create a new chat
+# Discards the current view and starts a fresh empty chat.
 func _on_new_chat_button_pressed() -> void:
 	_cancel_pending_request()
 	current_chat = {}
@@ -2562,12 +2704,13 @@ func _on_new_chat_button_pressed() -> void:
 	user_input_box.grab_focus()
 
 
-# Open the chat from the message history
+# Open the chat from the message history.
 func _open_chat(id: String) -> void:
 	_cancel_pending_request()
 	var chat := ChatStore.load_chat(id)
 	if chat.is_empty():
 		return
+	# Swap in the loaded chat and rebuild its bubbles.
 	current_chat = chat
 	_clear_message_list()
 	var messages = chat.get("messages", [])
@@ -2579,9 +2722,10 @@ func _open_chat(id: String) -> void:
 	_on_chat_button_pressed()
 
 
-# Delete chat
+# Deletes a saved chat, clearing the view when current.
 func _delete_chat(id: String) -> void:
 	ChatStore.delete_chat(id)
+	# Clear the view when the open chat was deleted.
 	if str(current_chat.get("id", "")) == id:
 		_cancel_pending_request()
 		current_chat = {}
@@ -2589,14 +2733,14 @@ func _delete_chat(id: String) -> void:
 	_refresh_history_list()
 
 
-# Refresh the histor list
+## Rebuilds the history list rows from saved chats.
 func _refresh_history_list() -> void:
-	# Iterate through history list and remove children
+	# Remove all history rows.
 	for child in history_list.get_children():
 		history_list.remove_child(child)
 		child.queue_free()
 
-	# Restore chats, update displayed text if no chats found
+	# Show a placeholder when no chats are saved.
 	var chats := ChatStore.list_chats()
 	if chats.is_empty():
 		var empty := Label.new()
@@ -2604,16 +2748,16 @@ func _refresh_history_list() -> void:
 		history_list.add_child(empty)
 		return
 
-	# Iterate through chats and add them back to the list
+	# Add one row per saved chat.
 	for chat in chats:
 		history_list.add_child(_make_history_row(chat))
 
 
-# Makes the history row node
+## Builds one history row with open and delete buttons.
 func _make_history_row(chat: Dictionary) -> HBoxContainer:
-	var row := HBoxContainer.new() # Create row to store chat button and delete button
+	var row := HBoxContainer.new() # Row holding the open and delete buttons.
 
-	# Create button to open chat
+	# Open-chat button.
 	var open_button := Button.new()
 	open_button.text = str(chat.get("title", "Untitled"))
 	open_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -2621,12 +2765,12 @@ func _make_history_row(chat: Dictionary) -> HBoxContainer:
 	open_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	open_button.pressed.connect(_open_chat.bind(str(chat.get("id", ""))))
 
-	# Create delete button
+	# Delete-chat button.
 	var delete_button := Button.new()
 	delete_button.text = "✕"
 	delete_button.pressed.connect(_delete_chat.bind(str(chat.get("id", ""))))
 
-	# Add buttons to row and return row node
+	# Assemble and return the row.
 	row.add_child(open_button)
 	row.add_child(delete_button)
 	return row

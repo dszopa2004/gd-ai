@@ -26,8 +26,7 @@ const REFRESH_AFTER_SEC := 72000 # re-mint past 20h; minted keys reportedly live
 const DEVICE_AUTH_URL := "https://auth.meta.com/oidc/device/authorization/"
 const DEVICE_TOKEN_URL := "https://auth.meta.com/oidc/device/token/"
 const KEY_MINT_URL := "https://api.meta.ai/muse-code/key"
-# Public OAuth client id observed from the official Muse CLI's device flow
-# (third-party agents reuse it; override if Meta issues per-app clients).
+# Public client id from the official Muse CLI device flow; override if Meta issues per-app clients.
 const DEFAULT_OAUTH_CLIENT_ID := "1031625952748946"
 
 var api_key := ""
@@ -36,10 +35,10 @@ const DEFAULT_REASONING_EFFORT := "low"
 const REASONING_EFFORT_OPTIONS := ["minimal", "low", "medium", "high", "xhigh"] # closed set: "none" is rejected by the endpoint
 var reasoning_effort := DEFAULT_REASONING_EFFORT
 var system_prompt := ""         # sent as a developer message, never stored in chat history
-var max_completion_tokens := 4096 # output cap is pay-per-use; reasoning + reply + tool calls share it, so 2048 truncates multi-op responses
+var max_completion_tokens := 4096 # output cap shared by reasoning, reply, and tool calls; 2048 truncates multi-op responses
 var busy := false
-var api_url := "" # override endpoint (empty = DEFAULT_API_URL); via settings, code, or MODEL_API_URL
-var streaming := false # when true, send() uses stream:true with chunked SSE append
+var api_url := "" # endpoint override (empty = DEFAULT_API_URL); via settings, code, or MODEL_API_URL
+var streaming := false # send() streams via SSE when true, except during JSON fallback
 var stream_timeout := 120.0 # seconds for the whole streamed request
 var max_retries := 3 # automatic retries for transient failures (429, 5xx, timeouts, network errors)
 var retry_base_delay := 1.0 # seconds; doubles per attempt, plus jitter
@@ -51,10 +50,10 @@ var max_context_chars := 4000 # clamp on injected context (<= 0 = unlimited)
 var max_history_messages := 20 # cap on history turns sent per request (<= 0 = unlimited)
 var max_history_chars := 8000 # cap on history text sent per request (<= 0 = unlimited)
 var oauth_client_id := DEFAULT_OAUTH_CLIENT_ID # public client for the device flow; override to use another
-var device_access_token := "" # OAuth device token (dca:…); persisted by save_session, refreshed by step 4
-var device_refresh_token := "" # kept when the token endpoint issues one; step 4 uses it
+var device_access_token := "" # OAuth device token; persisted by save_session, set on sign-in approval
+var device_refresh_token := "" # stored when the token endpoint issues one
 var meta_session := false # true when the active credential came from Meta sign-in (this boot or restored)
-var session_minted_at := 0 # unix seconds of the last mint (0 = unknown/pre-step-4)
+var session_minted_at := 0 # unix seconds of the last mint (0 = unknown)
 var sign_in_active := false # true while a device-code flow is in flight
 
 var _http: HTTPRequest
@@ -94,14 +93,14 @@ var _refresh_quiet := false # background refresh: failures keep the old key and 
 var _refreshed_this_request := false # at most one re-mint per chat request
 
 
-# Generate a new HTTP request upon instantiation
+## Initializes HTTP clients and disables polling until streaming starts.
 func _ready() -> void:
 	_ensure_http()
 	_ensure_oauth_http()
 	set_process(false) # enabled only while a stream is being polled
 
 
-# Ensure there is a http request
+## Creates and connects the chat HTTP client if missing.
 func _ensure_http() -> void:
 	if _http != null:
 		return
@@ -111,19 +110,21 @@ func _ensure_http() -> void:
 	_http.request_completed.connect(_on_request_completed)
 
 
-# Checks if the editor has the API key and returns it
+## Returns the editor setting value or an empty string.
 static func _get_editor_setting(settings: EditorSettings, key: String) -> String:
 	if settings.has_setting(key):
 		return str(settings.get_setting(key))
 	return ""
 
 
-# Loads persisted config, with environment variables overriding when set.
+## Loads persisted config, with environment variables overriding when set.
 func load_config() -> void:
+	# Defaults when no stored values exist
 	var stored_key := ""
 	var stored_url := ""
 	var stored_model := ""
 	var stored_effort := ""
+	# Read persisted values and OAuth session in the editor
 	if Engine.is_editor_hint():
 		var settings := EditorInterface.get_editor_settings()
 		stored_key = _get_editor_setting(settings, SETTINGS_API_KEY)
@@ -137,12 +138,14 @@ func load_config() -> void:
 	api_url = stored_url.strip_edges()
 	if not stored_model.strip_edges().is_empty():
 		model = stored_model.strip_edges()
+	# Keep stored effort only when it names a valid option
 	if not stored_effort.strip_edges().is_empty():
 		if stored_effort.strip_edges().to_lower() in REASONING_EFFORT_OPTIONS:
 			reasoning_effort = stored_effort.strip_edges().to_lower()
 		else:
 			push_warning("[GdAI] Stored reasoning effort '%s' is invalid; using '%s'." % [stored_effort.strip_edges(), DEFAULT_REASONING_EFFORT])
 			reasoning_effort = DEFAULT_REASONING_EFFORT
+	# Environment overrides stored settings when set
 	var env_key := OS.get_environment("MODEL_API_KEY").strip_edges()
 	if not env_key.is_empty():
 		api_key = env_key
@@ -152,13 +155,14 @@ func load_config() -> void:
 	if api_key.is_empty():
 		push_warning("[GdAI] No API key configured. Press Sign in, or paste a key in GdAI Settings (MODEL_API_KEY also works).")
 		return
+	# Flag Meta sessions and log which key source won
 	meta_session = not device_access_token.is_empty()
 	var source := "env" if not env_key.is_empty() else "settings"
 	var sess := " session=meta" if meta_session else ""
 	print("[GdAI] Config loaded: model=%s endpoint=%s key=%s [%s]%s." % [model, _effective_url(), fingerprint(api_key), source, sess])
 
 
-# Persists the current key, endpoint, model, and reasoning effort for the next session.
+## Persists the current key, endpoint, model, and reasoning effort for the next session.
 func save_config() -> void:
 	if not Engine.is_editor_hint():
 		return
@@ -169,9 +173,7 @@ func save_config() -> void:
 	settings.set_setting(SETTINGS_REASONING_EFFORT, reasoning_effort.strip_edges())
 
 
-# Persists the OAuth session (step 3): device + refresh tokens alongside the
-# minted key, which lives in the regular api_key slot. EditorSettings only —
-# user-local editor config, never project files.
+## Persists OAuth tokens plus minted key to EditorSettings only, never project files.
 func save_session() -> void:
 	if not Engine.is_editor_hint():
 		return
@@ -182,8 +184,7 @@ func save_session() -> void:
 	settings.set_setting(SETTINGS_SESSION_MINTED_AT, session_minted_at)
 
 
-# Drops the stored OAuth session (tokens only; api_key untouched). Step 4
-# wires this to logout; settings-save calls it when switching credentials.
+## Clears stored OAuth tokens while leaving the API key untouched.
 func clear_session() -> void:
 	device_access_token = ""
 	device_refresh_token = ""
@@ -195,24 +196,23 @@ func clear_session() -> void:
 	settings.set_setting(SETTINGS_OAUTH_REFRESH_TOKEN, "")
 
 
-# Sends a message to ai with adjusted settings
-# Throw error if HTTP request could not be started
+## Starts a fresh chat turn and clears JSON fallback state.
 func send(messages: Array) -> void:
 	_send_with_options(messages, true)
 
 
-# Follow-up turn of a multi-turn tool loop: same as send(), but a JSON-mode
-# fallback negotiated on an earlier turn is kept instead of retried natively.
-# Selects required unless the endpoint already rejected it (sticky step-down).
+## Follows up a tool loop, keeping fallback and requiring tools unless rejected.
 func send_followup(messages: Array) -> void:
 	if not _choice_stepped_down:
 		tool_choice = "required"
 	_send_with_options(messages, false)
 
 
+## Validates the key, trims history, then starts the request.
 func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 	if busy:
 		return
+	# Reject missing, placeholder, or whitespace-mangled keys
 	var key := _sanitize_key(api_key)
 	if key.is_empty():
 		request_failed.emit("No API key set. Press Sign in to log in with Meta, or paste a key in GdAI Settings.")
@@ -223,11 +223,13 @@ func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 	if key.contains(" ") or key.contains("\t") or key.contains("\n") or key.contains("\r"):
 		request_failed.emit("API key contains spaces or line breaks. Re-copy it without quotes or extra characters.")
 		return
+	# Trim history to budget before queuing the turn
 	var trimmed := trim_history(messages, max_history_messages, max_history_chars)
 	_pending_messages = trimmed["messages"]
 	_history_dropped = int(trimmed["dropped"])
 	if _history_dropped > 0:
 		print("[GdAI] Trimmed %d oldest %s to fit the history budget." % [_history_dropped, "message" if _history_dropped == 1 else "messages"])
+	# Fresh retry state; followups keep the fallback mode
 	_retry_attempt = 0
 	_refreshed_this_request = false
 	if reset_fallback:
@@ -236,7 +238,7 @@ func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 	_start_request()
 
 
-# Start a request to AI
+## Builds the chat payload and posts it via HTTP or streaming.
 func _start_request() -> void:
 	last_usage = {} # reset per attempt (fresh sends, retries, fallback re-entry)
 	var key := _sanitize_key(api_key) # Sanitize key
@@ -248,12 +250,12 @@ func _start_request() -> void:
 		request_failed.emit("No API key set. Press Sign in to log in with Meta, or paste a key in GdAI Settings.")
 		return
 
-	# Handle if already streaming
+	# Stream when enabled, except during JSON fallback
 	if streaming and not _json_fallback_active:
 		_send_stream(_pending_messages, key)
 		return
 
-	_ensure_http() # Create HTTP response
+	_ensure_http() # Create the HTTP client if missing
 	if _http == null:
 		busy = false
 		request_failed.emit("HTTP client is not ready.")
@@ -277,7 +279,7 @@ func _start_request() -> void:
 		"Content-Type: application/json",
 	])
 
-	# Create JSON body and fill settings
+	# Build the JSON request body
 	var payload := {
 		"model": model,
 		"messages": payload_messages,
@@ -304,11 +306,13 @@ func _start_request() -> void:
 	busy = true
 
 
-# Tolerate pasting the whole header value or a quoted string.
+## Tolerate pasting the whole header value or a quoted string.
 static func _sanitize_key(raw: String) -> String:
 	var key := raw.strip_edges()
+	# Strip a pasted "Bearer " prefix
 	if key.to_lower().begins_with("bearer "):
 		key = key.substr("bearer ".length()).strip_edges()
+	# Unwrap surrounding single or double quotes
 	if key.length() >= 2 \
 			and ((key.begins_with('"') and key.ends_with('"')) \
 			or (key.begins_with("'") and key.ends_with("'"))):
@@ -316,8 +320,9 @@ static func _sanitize_key(raw: String) -> String:
 	return key
 
 
-# Check if API key looks like placeholder
+## Reports whether an API key looks like a placeholder.
 static func _looks_like_placeholder(key: String) -> bool:
+	# Exact dummies or telltale pasted-template prefixes
 	var lowered := key.to_lower()
 	if lowered in ["your-key-here", "your_api_key", "your-api-key", "changeme", "xxx", "test", "key", "api_key", "apikey"]:
 		return true
@@ -325,9 +330,10 @@ static func _looks_like_placeholder(key: String) -> bool:
 		or lowered.begins_with("paste-") or lowered.begins_with("insert-")
 
 
-# Masked fingerprint for logs: confirms which key loaded without leaking it.
+## Masked fingerprint for logs: confirms which key loaded without leaking it.
 static func fingerprint(raw: String) -> String:
 	var key := _sanitize_key(raw)
+	# Degenerate keys get a label instead of a fingerprint
 	if key.is_empty():
 		return "missing"
 	if key.length() <= 6:
@@ -335,8 +341,7 @@ static func fingerprint(raw: String) -> String:
 	return "len=%d %s…%s" % [key.length(), key.left(4), key.substr(key.length() - 2)]
 
 
-# Declared editor actions, in OpenAI tools format. Phase 2 executes these;
-# returned calls are validated here before execution.
+## Declares editor actions in OpenAI tools format for validation and execution.
 static func default_tools() -> Array:
 	return [
 		{
@@ -519,8 +524,9 @@ static func default_tools() -> Array:
 	]
 
 
-# One-line signature for the JSON-mode fallback instruction, built from the schema.
+## One-line signature for the JSON-mode fallback instruction, built from the schema.
 static func _tool_signature(tool_def) -> String:
+	# Bail on malformed defs or nameless functions
 	if not tool_def is Dictionary:
 		return ""
 	var fn = tool_def.get("function", {})
@@ -529,6 +535,7 @@ static func _tool_signature(tool_def) -> String:
 	var fname := str(fn.get("name", ""))
 	if fname.is_empty():
 		return ""
+	# Collect property specs and the required list
 	var properties := {}
 	var required: Array = []
 	var params = fn.get("parameters", {})
@@ -537,6 +544,7 @@ static func _tool_signature(tool_def) -> String:
 			properties = params["properties"]
 		if params.get("required", []) is Array:
 			required = params["required"]
+	# Format each param as name[?]: type
 	var parts: Array[String] = []
 	for pname in properties.keys():
 		var spec = properties[pname]
@@ -554,8 +562,9 @@ static func _tool_signature(tool_def) -> String:
 	return sig
 
 
-# Instruction used when the endpoint rejects tools: answer in strict JSON instead.
+## Instruction used when the endpoint rejects tools: answer in strict JSON instead.
 func _json_fallback_instruction() -> String:
+	# Schema line, allowed actions, then reply convention
 	var lines: Array[String] = []
 	lines.append("You have no function-calling ability. Always reply with exactly one JSON object, nothing else: {\"actions\": [{\"name\": \"<action>\", \"arguments\": {<params as a JSON object>}}], \"reply\": \"<chat text>\"}.")
 	lines.append("Use ONLY these actions:")
@@ -567,7 +576,7 @@ func _json_fallback_instruction() -> String:
 	return "\n".join(lines)
 
 
-# Choose effective tool
+## Returns the configured tool choice or auto when invalid.
 func _effective_tool_choice() -> Variant:
 	if tool_choice is Dictionary:
 		return tool_choice
@@ -576,7 +585,7 @@ func _effective_tool_choice() -> Variant:
 	return "auto"
 
 
-# Choose system prompt
+## Returns the system prompt with JSON fallback instructions when active.
 func _effective_system_prompt() -> String:
 	if not _json_fallback_active:
 		return system_prompt
@@ -585,16 +594,18 @@ func _effective_system_prompt() -> String:
 	return system_prompt + "\n\n" + _json_fallback_instruction()
 
 
-# Implement context prompt
+## Returns the editor context clamped to the character budget.
 func _effective_context_prompt() -> String:
 	var context := context_prompt.strip_edges()
 	if context.is_empty():
 		return ""
+	# Clamp to budget with a truncation marker
 	if max_context_chars > 0 and context.length() > max_context_chars:
 		context = context.left(max_context_chars).strip_edges() + "\n…(context truncated)"
 	return context
 
 
+## Returns the configured endpoint or the default API URL.
 func _effective_url() -> String:
 	var url := api_url.strip_edges()
 	if url.is_empty():
@@ -602,7 +613,7 @@ func _effective_url() -> String:
 	return url
 
 
-# Apply tool field
+## Applies tool fields or JSON-mode format to the request payload.
 func _apply_tool_fields(payload: Dictionary) -> void:
 	if _json_fallback_active:
 		payload["response_format"] = {"type": "json_object"}
@@ -613,7 +624,7 @@ func _apply_tool_fields(payload: Dictionary) -> void:
 	payload["tool_choice"] = _effective_tool_choice()
 
 
-# Cancels the HTTP request
+## Cancels the active request, retries, and streaming state.
 func cancel() -> void:
 	_request_generation += 1 # invalidates any scheduled retry
 	_expecting_response = false
@@ -626,20 +637,22 @@ func cancel() -> void:
 	busy = false
 
 
-# Stream
+## Polls the active stream each frame while streaming continues.
 func _process(_delta: float) -> void:
 	if _streaming_active:
 		_poll_stream()
 
 
-# Starts a stream:true request polled through HTTPClient (HTTPRequest can't stream).
+## Starts a stream:true request polled through HTTPClient (HTTPRequest can't stream).
 func _send_stream(messages: Array, key: String) -> void:
+	# Split the endpoint for HTTPClient
 	var url := _effective_url()
 	var parts := _parse_url(url)
 	if parts.is_empty():
 		request_failed.emit("Invalid API endpoint URL.")
 		return
 
+	# System, context, and trim note precede the chat turns
 	var payload_messages: Array = []
 	var effective_system := _effective_system_prompt()
 	if not effective_system.is_empty():
@@ -658,6 +671,7 @@ func _send_stream(messages: Array, key: String) -> void:
 		"Content-Type: application/json",
 		"Accept: text/event-stream",
 	])
+	# Stream payload asks for usage alongside the deltas
 	var payload := {
 		"model": model,
 		"messages": payload_messages,
@@ -668,6 +682,7 @@ func _send_stream(messages: Array, key: String) -> void:
 	}
 	_apply_tool_fields(payload)
 	_stream_body = JSON.stringify(payload)
+	# Open the host connection, with TLS for https
 	var tls_options: TLSOptions = null
 	if parts["tls"]:
 		tls_options = TLSOptions.client()
@@ -681,6 +696,7 @@ func _send_stream(messages: Array, key: String) -> void:
 			request_failed.emit(connect_message)
 		return
 
+	# Reset stream buffers and arm the deadline
 	_stream_request_sent = false
 	_stream_status_checked = false
 	_stream_code = 0
@@ -696,8 +712,9 @@ func _send_stream(messages: Array, key: String) -> void:
 	busy = true
 
 
-# Parse URL
+## Parses an endpoint URL into host, port, TLS, and path.
 static func _parse_url(url: String) -> Dictionary:
+	# Scheme decides TLS; anything else is invalid
 	var rest := url.strip_edges()
 	var tls := false
 	if rest.begins_with("https://"):
@@ -707,11 +724,13 @@ static func _parse_url(url: String) -> Dictionary:
 		rest = rest.substr("http://".length())
 	else:
 		return {}
+	# Split host[:port] from the path
 	var slash := rest.find("/")
 	var authority := rest if slash == -1 else rest.left(slash)
 	var path := "/" if slash == -1 else rest.substr(slash)
 	var host := authority
 	var port := 443 if tls else 80
+	# Optional port overrides the scheme default
 	var colon := authority.rfind(":")
 	if colon != -1:
 		host = authority.left(colon)
@@ -724,11 +743,13 @@ static func _parse_url(url: String) -> Dictionary:
 	return {"host": host, "port": port, "tls": tls, "path": path}
 
 
-# Poll stream
+## Advances the streaming connection and dispatches its current status.
 func _poll_stream() -> void:
+	# Whole-request timeout guards a stalled stream
 	if Time.get_ticks_msec() > _stream_deadline:
 		_finish_stream_error("The request timed out. Lower reasoning effort or try again.", true)
 		return
+	# Advance the connection, then dispatch its status
 	var err := _stream_client.poll()
 	if err != OK:
 		_finish_stream_error("Network error (poll %d)." % err, true)
@@ -763,8 +784,9 @@ func _poll_stream() -> void:
 				_finish_stream_success()
 
 
-# Read the stream chunks
+## Reads available stream chunks into text or error buffers.
 func _read_stream_chunks() -> void:
+	# Drain available chunks into error or text buffers
 	while _stream_client.get_status() == HTTPClient.STATUS_BODY:
 		var chunk := _stream_client.read_response_body_chunk()
 		if chunk.is_empty():
@@ -775,19 +797,20 @@ func _read_stream_chunks() -> void:
 			_append_stream_text(chunk.get_string_from_utf8())
 			if not _streaming_active:
 				return # [DONE] or an error finished the stream mid-read.
+	# Non-200 bodies fail once fully buffered
 	if _stream_code != 200 and _stream_body_complete():
 		_finish_stream_error_from_body()
 
 
-# Confirm if stream body is complete. Error bytes are the only body tracked
-# while streaming (HTTPClient has no get_downloaded_bytes; that's HTTPRequest).
+## Detects a complete error body since HTTPClient tracks no byte counts.
 func _stream_body_complete() -> bool:
 	var total := _stream_client.get_response_body_length()
 	return total >= 0 and _stream_error_bytes.size() >= total
 
 
-# Append stream text
+## Buffers stream text and dispatches each complete SSE line.
 func _append_stream_text(text: String) -> void:
+	# Hold the last partial line for the next chunk
 	_stream_leftover += text
 	var lines := _stream_leftover.split("\n")
 	_stream_leftover = lines[lines.size() - 1]
@@ -797,7 +820,7 @@ func _append_stream_text(text: String) -> void:
 		_handle_sse_line(lines[i].strip_edges())
 
 
-# Normalize a response usage block into ints; ignored when absent/empty.
+## Normalize a response usage block into ints; ignored when absent/empty.
 func _capture_usage(parsed: Dictionary) -> void:
 	var u = parsed.get("usage", {})
 	if u is Dictionary and not (u as Dictionary).is_empty():
@@ -808,8 +831,9 @@ func _capture_usage(parsed: Dictionary) -> void:
 		}
 
 
-# Handle SSE
+## Parses one SSE line into content, tool deltas, or completion.
 func _handle_sse_line(line: String) -> void:
+	# Skip heartbeats and non-data fields
 	if line.is_empty() or line.begins_with(":"):
 		return
 	if not line.begins_with("data:"):
@@ -817,6 +841,7 @@ func _handle_sse_line(line: String) -> void:
 	var payload := line.substr("data:".length()).strip_edges()
 	if payload.is_empty():
 		return
+	# Terminal marker ends the stream successfully
 	if payload == "[DONE]":
 		_finish_stream_success()
 		return
@@ -833,12 +858,14 @@ func _handle_sse_line(line: String) -> void:
 	var first = choices[0]
 	if not first is Dictionary:
 		return
+	# Remember how the turn ended, then read the delta
 	var choice_finish := str(first.get("finish_reason", ""))
 	if not choice_finish.is_empty():
 		_stream_finish_reason = choice_finish
 	var delta = first.get("delta", {})
 	if not delta is Dictionary:
 		return
+	# Merge tool fragments; announce once tools start arriving
 	var call_deltas = delta.get("tool_calls", [])
 	if call_deltas is Array:
 		for raw in call_deltas:
@@ -846,14 +873,16 @@ func _handle_sse_line(line: String) -> void:
 		if _stream_content.is_empty() and not _stream_tool_announced and not _stream_tool_calls.is_empty():
 			_stream_tool_announced = true
 			stream_updated.emit("Preparing actions…")
+	# Append new text and push the running transcript
 	var piece = delta.get("content", "")
 	if piece is String and not piece.is_empty():
 		_stream_content += piece
 		stream_updated.emit(_stream_content)
 
 
-# Get stream error message
+## Extracts a readable message from a stream error payload.
 static func _stream_error_message(err) -> String:
+	# Dict errors show as "code: message"; strings pass through
 	var message := "Stream error."
 	if err is Dictionary:
 		message = str(err.get("message", message))
@@ -865,8 +894,9 @@ static func _stream_error_message(err) -> String:
 	return message
 
 
-# Finish stream
+## Completes the stream by emitting content or validated tool calls.
 func _finish_stream_success() -> void:
+	# Snapshot buffers before cleanup clears them
 	var content := _stream_content
 	var tool_slots: Dictionary = _stream_tool_calls
 	_cleanup_stream()
@@ -874,6 +904,7 @@ func _finish_stream_success() -> void:
 		if _stream_finish_reason == "length":
 			request_failed.emit("Response was cut off at the token limit (finish_reason=length); retry with fewer ops in one prompt or raise Max completion tokens.")
 			return
+		# Rebuild calls in index order for validation
 		var raw_calls: Array = []
 		var indexes := tool_slots.keys()
 		indexes.sort()
@@ -895,7 +926,7 @@ func _finish_stream_success() -> void:
 		response_received.emit(content)
 
 
-# Emit stream error message
+## Fails the stream, retrying when the error is retryable.
 func _finish_stream_error(message: String, retryable := false) -> void:
 	_cleanup_stream()
 	if retryable and _retry_attempt < max_retries:
@@ -904,8 +935,9 @@ func _finish_stream_error(message: String, retryable := false) -> void:
 		request_failed.emit(message)
 
 
-# Emit stream error from body
+## Fails a non-200 stream after trying recovery and retry paths.
 func _finish_stream_error_from_body() -> void:
+	# Decode the buffered error body when present
 	var parsed = null
 	if not _stream_error_bytes.is_empty():
 		parsed = JSON.parse_string(_stream_error_bytes.get_string_from_utf8())
@@ -914,6 +946,7 @@ func _finish_stream_error_from_body() -> void:
 	if _stream_client != null:
 		headers = _stream_client.get_response_headers()
 	_cleanup_stream()
+	# Recovery paths run before the retry-or-fail decision
 	if _maybe_step_down_tool_choice(code, parsed):
 		return
 	if _maybe_start_json_fallback(code, parsed):
@@ -929,7 +962,7 @@ func _finish_stream_error_from_body() -> void:
 		request_failed.emit(_describe_error(code, parsed, headers))
 
 
-# Cleanup stream
+## Closes the stream client and resets all streaming state.
 func _cleanup_stream() -> void:
 	_streaming_active = false
 	_stream_tool_calls = {}
@@ -941,12 +974,13 @@ func _cleanup_stream() -> void:
 	busy = false
 
 
-# Schedule a retry
+## Schedules a retry attempt guarded by the request generation.
 func _schedule_retry(delay: float, terminal_message: String) -> void:
 	if get_tree() == null:
 		busy = false
 		request_failed.emit(terminal_message)
 		return
+	# Count the attempt and pin the timer to this request
 	_retry_attempt += 1
 	busy = true
 	var generation := _request_generation
@@ -959,18 +993,18 @@ func _schedule_retry(delay: float, terminal_message: String) -> void:
 	)
 
 
-# Set backoff delay
+## Computes exponential backoff with jitter honoring an extra minimum.
 func _backoff_delay(extra_min := 0.0) -> float:
 	var delay := minf(retry_base_delay * pow(2.0, float(_retry_attempt)), retry_max_delay)
 	return maxf(delay, extra_min) + randf() * 0.5
 
 
-# Return if a code is a retryable code
+## Reports whether an HTTP status code is worth retrying.
 static func _is_retryable_code(code: int) -> bool:
 	return code == 429 or code == 500 or code == 502 or code == 503 or code == 504
 
 
-# Return if a HTTP request is retryable
+## Reports whether a network failure result is worth retrying.
 static func _is_retryable_result(result: int) -> bool:
 	return result in [
 		HTTPRequest.RESULT_TIMEOUT,
@@ -982,8 +1016,9 @@ static func _is_retryable_result(result: int) -> bool:
 	]
 
 
-# Parse error
+## Parses the Retry-After header delay or returns negative one.
 static func _parse_retry_after(headers: PackedStringArray) -> float:
+	# First numeric Retry-After wins; anything else means absent
 	for h in headers:
 		if h.to_lower().begins_with("retry-after:"):
 			var pos := h.find(":")
@@ -996,9 +1031,9 @@ static func _parse_retry_after(headers: PackedStringArray) -> float:
 	return -1.0
 
 
-# Validates one parsed call against the declared tools. Returns "" when valid,
-# otherwise a human-readable reason. Static so Phase 2 can reuse it at execution time.
+## Validates one tool call, returning an error reason or empty string.
 static func validate_tool_call(tools_defs: Array, call_name: String, args: Variant) -> String:
+	# Find the declared function matching the call name
 	var fn_def = null
 	for t in tools_defs:
 		if t is Dictionary and str(t.get("type", "function")) == "function":
@@ -1006,6 +1041,7 @@ static func validate_tool_call(tools_defs: Array, call_name: String, args: Varia
 			if f is Dictionary and str(f.get("name", "")) == call_name:
 				fn_def = f
 				break
+	# Unknown actions and non-object arguments fail fast
 	if fn_def == null:
 		return "unknown action (not in the declared tools)"
 	if not args is Dictionary:
@@ -1016,11 +1052,13 @@ static func validate_tool_call(tools_defs: Array, call_name: String, args: Varia
 	var properties = params.get("properties", {})
 	if not properties is Dictionary:
 		properties = {}
+	# Every required parameter must be present
 	var required = params.get("required", [])
 	if required is Array:
 		for req in required:
 			if not args.has(req):
 				return "missing required parameter '%s'" % str(req)
+	# Check each argument for unknown names, enums, and types
 	var allow_extra := bool(params.get("additionalProperties", true))
 	for pname in args.keys():
 		if not properties.has(pname):
@@ -1042,7 +1080,9 @@ static func validate_tool_call(tools_defs: Array, call_name: String, args: Varia
 	return ""
 
 
+## Checks a value against a JSON type, returning an error or empty.
 static func _check_json_type(value: Variant, want: String) -> String:
+	# Bools need exclusion since GDScript treats them as ints
 	var is_bool := value is bool
 	match want:
 		"string":
@@ -1077,12 +1117,13 @@ static func _check_json_type(value: Variant, want: String) -> String:
 			return ""
 
 
-# Normalizes message content (string, parts array, or null) to plain text.
+## Normalizes message content (string, parts array, or null) to plain text.
 static func _content_to_text(content) -> String:
 	if content == null:
 		return ""
 	if content is String:
 		return content
+	# Part lists concatenate each chunk's text
 	if content is Array:
 		var parts: Array[String] = []
 		for part in content:
@@ -1094,9 +1135,9 @@ static func _content_to_text(content) -> String:
 	return str(content)
 
 
-# Keeps the most recent history within both budgets. Never mutates the input.
-# Returns {"messages": [...], "dropped": n}. At least one message is always kept.
+## Trims history to both budgets without mutating input, always keeping one.
 static func trim_history(messages: Array, max_messages: int, max_chars: int) -> Dictionary:
+	# Walk back from newest, keeping turns inside both budgets
 	var kept: Array = []
 	var chars := 0
 	var count := 0
@@ -1107,15 +1148,13 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 		var text := ""
 		if msg is Dictionary:
 			text = _content_to_text(msg.get("content", ""))
+		# Char budget never drops the single newest turn
 		if max_chars > 0 and count > 0 and chars + text.length() > max_chars:
 			break
 		kept.push_front(msg)
 		chars += text.length()
 		count += 1
-	# Repair 1: never strand a tool result. A huge newest message can eat the
-	# whole budget, leaving a lone leading tool that the strip below would
-	# pop — yielding zero messages and a 400. Extend back to its assistant
-	# owner instead (an intact pair may legally lead; budget yields here).
+	# Repair 1: never strand a tool result — extend back to its assistant owner so the strip below can't empty the list.
 	if not kept.is_empty() and kept[0] is Dictionary and str(kept[0].get("role", "")) == "tool":
 		var idx := messages.size() - kept.size() - 1
 		while idx >= 0:
@@ -1133,8 +1172,7 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 	# Never start on a dangling turn (an intact assistant tool pair may lead).
 	while not kept.is_empty() and kept[0] is Dictionary and _is_dangling_lead(kept[0]):
 		kept.pop_front()
-	# Repair 2: if the strip emptied everything, fall back to the newest user
-	# turn alone rather than sending a messageless (400-guaranteed) payload.
+	# Repair 2: if the strip emptied everything, send the newest user turn alone, never a messageless (400) payload.
 	if kept.is_empty() and not messages.is_empty():
 		for i in range(messages.size() - 1, -1, -1):
 			var msg = messages[i]
@@ -1144,10 +1182,7 @@ static func trim_history(messages: Array, max_messages: int, max_chars: int) -> 
 	return {"messages": kept, "dropped": messages.size() - kept.size()}
 
 
-# A kept suffix may only start mid-conversation on a user turn or an intact
-# assistant tool pair. A leading tool result (its assistant turn was cut) or a
-# plain leading assistant reply would dangle, and the API rejects dangling
-# tool messages — so both are dropped.
+## Detects leading tool or bare assistant turns the API would reject.
 static func _is_dangling_lead(msg: Dictionary) -> bool:
 	var role := str(msg.get("role", ""))
 	if role == "tool":
@@ -1158,13 +1193,13 @@ static func _is_dangling_lead(msg: Dictionary) -> bool:
 	return false
 
 
-# Validates + normalizes a model-supplied script path. Sandboxes to res://
-# files ending in .gd: absolute paths, other schemes, and ".." are rejected.
-# Returns {"ok": bool, "path": normalized res:// path, "error": String}.
+## Validates a script path confined to res:// files ending in .gd.
 static func validate_script_path(raw_path: String) -> Dictionary:
+	# Normalize separators before any checks
 	var clean := raw_path.strip_edges().replace("\\", "/")
 	if clean.is_empty():
 		return {"ok": false, "path": "", "error": "script path is empty"}
+	# Absolute URLs must be res://; bare paths gain the prefix
 	if clean.contains("://"):
 		if not clean.begins_with("res://"):
 			return {"ok": false, "path": "", "error": "script path must be inside res://"}
@@ -1172,6 +1207,7 @@ static func validate_script_path(raw_path: String) -> Dictionary:
 		if clean.begins_with("/") or clean.contains(":"):
 			return {"ok": false, "path": "", "error": "script path must be inside res://"}
 		clean = "res://" + clean
+	# Reject escapes, then require a .gd file name
 	if clean.contains(".."):
 		return {"ok": false, "path": "", "error": "script path must not contain '..'"}
 	if not clean.to_lower().ends_with(".gd"):
@@ -1181,12 +1217,13 @@ static func validate_script_path(raw_path: String) -> Dictionary:
 	return {"ok": true, "path": clean, "error": ""}
 
 
-# Attach-path gate for @-mentions: same res:// sandbox as scripts, but both
-# scripts (.gd) and scenes (.tscn) may be attached to a message.
+## Validates an attach path sandboxed to res:// .gd or .tscn files.
 static func validate_attach_path(raw_path: String) -> Dictionary:
+	# Normalize separators before any checks
 	var clean := raw_path.strip_edges().replace("\\", "/")
 	if clean.is_empty():
 		return {"ok": false, "path": "", "error": "attach path is empty"}
+	# Absolute URLs must be res://; bare paths gain the prefix
 	if clean.contains("://"):
 		if not clean.begins_with("res://"):
 			return {"ok": false, "path": "", "error": "attach path must be inside res://"}
@@ -1194,6 +1231,7 @@ static func validate_attach_path(raw_path: String) -> Dictionary:
 		if clean.begins_with("/") or clean.contains(":"):
 			return {"ok": false, "path": "", "error": "attach path must be inside res://"}
 		clean = "res://" + clean
+	# Reject escapes, then require a .gd or .tscn file
 	if clean.contains(".."):
 		return {"ok": false, "path": "", "error": "attach path must not contain '..'"}
 	var low := clean.to_lower()
@@ -1204,14 +1242,14 @@ static func validate_attach_path(raw_path: String) -> Dictionary:
 	return {"ok": true, "path": clean, "error": ""}
 
 
-# Pure find/replace core for script edits. Requires exactly one match so an
-# ambiguous find can never rewrite the wrong block.
-# Returns {"ok": bool, "content": new text, "error": String, "noop": bool}.
+## Applies find-and-replace requiring exactly one match in content.
 static func apply_script_edit(content: String, find: String, replace: String) -> Dictionary:
+	# Empty finds fail; identical text is a no-op success
 	if find.is_empty():
 		return {"ok": false, "content": content, "error": "find text is empty"}
 	if find == replace:
 		return {"ok": true, "content": content, "error": "", "noop": true}
+	# Exactly one match may be replaced
 	var hits := content.count(find)
 	if hits == 0:
 		return {"ok": false, "content": content, "error": "find text not found in file"}
@@ -1220,8 +1258,9 @@ static func apply_script_edit(content: String, find: String, replace: String) ->
 	return {"ok": true, "content": content.replace(find, replace), "error": ""}
 
 
-# Check if a tool might be unsupported
+## Detects tool-rejection errors mentioning unsupported or unknown tool fields.
 static func _looks_like_tools_unsupported(parsed) -> bool:
+	# Pull code and message from dict or string errors
 	if not parsed is Dictionary:
 		return false
 	var err = parsed.get("error", null)
@@ -1232,6 +1271,7 @@ static func _looks_like_tools_unsupported(parsed) -> bool:
 		message = str(err.get("message", ""))
 	elif err is String:
 		message = err
+	# Must mention tools plus a rejection keyword
 	var hay := (code_str + " " + message).to_lower()
 	if hay.strip_edges().is_empty() or not hay.contains("tool"):
 		return false
@@ -1239,8 +1279,9 @@ static func _looks_like_tools_unsupported(parsed) -> bool:
 		or hay.contains("unrecognized") or hay.contains("parameter") or hay.contains("field")
 
 
-# One-line "code message" detail from an API error body for log lines.
+## One-line "code message" detail from an API error body for log lines.
 static func _error_detail(parsed) -> String:
+	# Unwrap the error envelope when present
 	var err = null
 	if parsed is Dictionary:
 		err = parsed.get("error", null)
@@ -1257,10 +1298,9 @@ static func _error_detail(parsed) -> String:
 	return detail if not detail.is_empty() else "unspecified error"
 
 
-# If the endpoint rejected tool_choice=required specifically, step down to
-# auto and retry natively once (sticky for the session). Returns true when
-# the retry was started. Anything else falls through to JSON fallback.
+## Steps down rejected required tools to auto, returning true when retrying.
 func _maybe_step_down_tool_choice(code: int, parsed) -> bool:
+	# Only a required-choice 400 naming tool_choice qualifies
 	if _choice_stepped_down or tool_choice != "required" or code != 400:
 		return false
 	if not _error_detail(parsed).to_lower().contains("tool_choice"):
@@ -1272,9 +1312,9 @@ func _maybe_step_down_tool_choice(code: int, parsed) -> bool:
 	return true
 
 
-# If the endpoint rejected the tools parameter, re-issue once as JSON-mode
-# single-shot. Returns true when the fallback request was started.
+## Starts JSON fallback once when tools are rejected, returning true.
 func _maybe_start_json_fallback(code: int, parsed) -> bool:
+	# Only the first tools-rejecting 400 triggers fallback
 	if _json_fallback_active or tools.is_empty():
 		return false
 	if code != 400:
@@ -1287,10 +1327,9 @@ func _maybe_start_json_fallback(code: int, parsed) -> bool:
 	return true
 
 
-# Handle a native tool call. Per-call tolerant: invalid calls are skipped
-# (logged + noted) while valid siblings still execute; only an all-invalid
-# batch fails the turn.
+## Emits valid native tool calls, skipping invalid ones unless all fail.
 func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
+	# Collect valid calls and reasons for each skip
 	var calls: Array = []
 	var skipped: Array[String] = []
 	var stamp := Time.get_ticks_msec()
@@ -1306,6 +1345,7 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 		if not fn is Dictionary:
 			skipped.append("%s has no function object" % tag)
 			continue
+		# Arguments arrive as a JSON string or a dict
 		var fname := str(fn.get("name", ""))
 		var args_raw = fn.get("arguments", "")
 		var args := {}
@@ -1323,6 +1363,7 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 			print("[GdAI] rejected native tool call: ", JSON.stringify(raw))
 			skipped.append("%s '%s': arguments must be an object" % [tag, fname])
 			continue
+		# Drop calls failing schema validation, logging the raw form
 		var problem := validate_tool_call(tools, fname, args)
 		if not problem.is_empty():
 			var got := ", ".join(args.keys())
@@ -1331,11 +1372,13 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 			print("[GdAI] rejected native tool call: ", JSON.stringify(raw))
 			skipped.append("%s '%s': %s (got: %s)" % [tag, fname, problem, got])
 			continue
+		# Mint an id when the endpoint omits one
 		var call_id := str(raw.get("id", ""))
 		if call_id.is_empty():
 			call_id = "call_native_%d_%d" % [stamp, index]
 		calls.append({"id": call_id, "name": fname, "arguments": args})
 		index += 1
+	# No valid calls: report skips, preamble, or empty content
 	if calls.is_empty():
 		if not skipped.is_empty():
 			request_failed.emit("Invalid native action(s): " + "; ".join(skipped))
@@ -1351,19 +1394,21 @@ func _handle_native_tool_calls(raw_calls: Array, preamble: String) -> void:
 	tool_calls_received.emit(calls, preamble)
 
 
-# Best-effort extraction of the fallback JSON object from model text that may
-# wrap it in prose or code fences. Returns the parsed Dictionary, or {}.
+## Extracts fallback JSON actions from prose or code-fenced model text.
 static func _extract_fallback_json(text: String) -> Dictionary:
+	# Unwrap a single code fence when present
 	var clean := text.strip_edges()
 	if clean.begins_with("```"):
 		var nl := clean.find("\n")
 		var end := clean.rfind("```")
 		if nl != -1 and end > nl:
 			clean = clean.substr(nl + 1, end - nl - 1).strip_edges()
+	# Fast path: the whole reply is the actions object
 	if clean.begins_with("{"):
 		var whole = JSON.parse_string(clean)
 		if whole is Dictionary and whole.has("actions"):
 			return whole
+	# Otherwise scan braced spans for one holding actions
 	var tries := 0
 	var from := 0
 	while tries < 10:
@@ -1381,9 +1426,9 @@ static func _extract_fallback_json(text: String) -> Dictionary:
 	return {}
 
 
-# String-aware balanced-brace scan: the substring from the opening brace at
-# open_at through its match, or "" when unbalanced.
+## Extracts balanced braces from an offset, returning empty when unbalanced.
 static func _balanced_braces(text: String, open_at: int) -> String:
+	# Track nesting while ignoring braces inside strings
 	var depth := 0
 	var in_string := false
 	var escaped := false
@@ -1408,8 +1453,9 @@ static func _balanced_braces(text: String, open_at: int) -> String:
 	return ""
 
 
-# Handle fallback
+## Handles JSON-mode fallback text by emitting validated action calls.
 func _handle_fallback_json(text: String) -> void:
+	# Empty fails; unparseable text passes through as chat
 	if text.is_empty():
 		request_failed.emit("Response had empty content.")
 		return
@@ -1421,6 +1467,7 @@ func _handle_fallback_json(text: String) -> void:
 	if not actions is Array:
 		request_failed.emit("Invalid action JSON: \"actions\" must be an array.")
 		return
+	# No actions means plain chat or empty content
 	var preamble := str(parsed.get("reply", ""))
 	if actions.is_empty():
 		if preamble.is_empty():
@@ -1428,6 +1475,7 @@ func _handle_fallback_json(text: String) -> void:
 		else:
 			response_received.emit(preamble)
 		return
+	# Validate each action against the declared tools
 	var calls: Array = []
 	var skipped: Array[String] = []
 	var stamp := Time.get_ticks_msec()
@@ -1466,8 +1514,9 @@ func _handle_fallback_json(text: String) -> void:
 	tool_calls_received.emit(calls, preamble)
 
 
-# Accumulate tool
+## Merges streamed tool-call fragments into slots by index.
 func _accumulate_tool_delta(raw) -> void:
+	# Slot fragments by their stream index
 	if not raw is Dictionary:
 		return
 	var idx := int(raw.get("index", 0))
@@ -1477,6 +1526,7 @@ func _accumulate_tool_delta(raw) -> void:
 	var rid := str(raw.get("id", ""))
 	if not rid.is_empty():
 		slot["id"] = rid
+	# Names replace; argument chunks concatenate
 	var rfn = raw.get("function", {})
 	if rfn is Dictionary:
 		var rname := str(rfn.get("name", ""))
@@ -1487,13 +1537,14 @@ func _accumulate_tool_delta(raw) -> void:
 			slot["arguments"] = str(slot["arguments"]) + rargs
 
 
-# Handles what happens when a request is complete
+# Handles chat HTTP completion with retries, fallback, and dispatch.
 func _on_request_completed(result: int, code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
 	if not _expecting_response:
 		return # stale completion after cancel; a retry timer or newer request owns the state
 	_expecting_response = false
 	busy = false
 
+	# Transport failures retry when retryable
 	if result != HTTPRequest.RESULT_SUCCESS:
 		var net_message := "Network error (result %d)." % result
 		if _is_retryable_result(result) and _retry_attempt < max_retries:
@@ -1504,7 +1555,7 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
 
-	# If there is an error code, check what the error code was
+	# Recover, retry, or fail non-200 responses
 	if code != 200:
 		if _maybe_step_down_tool_choice(code, parsed):
 			return
@@ -1533,7 +1584,7 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 		request_failed.emit("Response had no choices.")
 		return
 
-	# Get the message and send the response message (or structured actions) to the dock
+	# Dispatch the message text or tool calls to the dock
 	var first = choices[0]
 	if not first is Dictionary:
 		request_failed.emit("Unexpected response from server.")
@@ -1542,6 +1593,7 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 	if not message is Dictionary:
 		request_failed.emit("Unexpected response from server.")
 		return
+	# Native calls win; otherwise JSON mode or plain text
 	var raw_calls = message.get("tool_calls", [])
 	var text := _content_to_text(message.get("content", ""))
 	if raw_calls is Array and not raw_calls.is_empty():
@@ -1559,8 +1611,9 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 	response_received.emit(text)
 
 
-# Describes the error based on error code
+## Formats a user-facing message for an HTTP error response.
 func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
+	# Pull message and code from dict or string errors
 	var message := "HTTP %d" % code
 	var err_code := ""
 	if parsed is Dictionary:
@@ -1575,7 +1628,7 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 	if not err_code.is_empty() and err_code.to_lower() != message.to_lower():
 		shown = "%s: %s" % [err_code, message]
 
-	# Return the error code reasoning
+	# Map the status code to a user-facing message
 	match code:
 		400:
 			return "Bad request. (%s)" % shown
@@ -1588,6 +1641,7 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 		404:
 			return "Model or endpoint not found. (%s)" % shown
 		429:
+			# Surface the server's wait hint when present
 			for h in headers:
 				if h.to_lower().begins_with("retry-after:"):
 					var pos := h.find(":")
@@ -1605,13 +1659,7 @@ func _describe_error(code: int, parsed, headers: PackedStringArray) -> String:
 
 
 # --- Phase 4 step 2: OAuth device flow (RFC 8628) + inference-key minting.
-# Meta offers no localhost-redirect flow for third parties; the official
-# `muse login` uses device-code, so this plugin does too: request a code,
-# poll until the user approves in the browser, then mint a Model API key
-# from the device token. The session is persisted by save_session (step 4
-# refreshes it and logs out). Uses its own HTTPRequest so chat
-# requests never interfere, and surfaces endpoint errors verbatim so the
-# first live run can confirm the exact field shapes.
+## Creates and connects the OAuth HTTP client if missing.
 func _ensure_oauth_http() -> void:
 	if _oauth_http != null:
 		return
@@ -1621,7 +1669,9 @@ func _ensure_oauth_http() -> void:
 	_oauth_http.request_completed.connect(_on_oauth_completed)
 
 
+## Starts the device-code sign-in by requesting a user code.
 func begin_device_sign_in() -> void:
+	# One flow at a time, and never without a client id
 	if sign_in_active:
 		return
 	if oauth_client_id.strip_edges().is_empty():
@@ -1631,6 +1681,7 @@ func begin_device_sign_in() -> void:
 	sign_in_active = true
 	_oauth_poll_interval = 5.0
 	_oauth_step = "code"
+	# Form-encoded device-code request starts the flow
 	var body := "client_id=%s" % oauth_client_id.strip_edges().uri_encode()
 	var err := _oauth_http.request(DEVICE_AUTH_URL, PackedStringArray(["Content-Type: application/x-www-form-urlencoded"]), HTTPClient.METHOD_POST, body)
 	if err != OK:
@@ -1638,7 +1689,9 @@ func begin_device_sign_in() -> void:
 		sign_in_failed.emit("Could not reach Meta sign-in (error %d)." % err)
 
 
+## Cancels the active sign-in flow and notifies listeners.
 func cancel_device_sign_in() -> void:
+	# A cancelled background refresh must also release the chat slot
 	if not sign_in_active:
 		return
 	var resend := _refreshing_for_retry
@@ -1652,6 +1705,7 @@ func cancel_device_sign_in() -> void:
 	sign_in_cancelled.emit()
 
 
+## Clears sign-in state, requests, and the polling timer.
 func _end_sign_in() -> void:
 	sign_in_active = false
 	_oauth_step = ""
@@ -1665,7 +1719,9 @@ func _end_sign_in() -> void:
 		_oauth_timer = null
 
 
+## Schedules the next device-code poll after the current interval.
 func _schedule_oauth_poll() -> void:
+	# Reuse one one-shot timer between polls
 	_oauth_step = "wait"
 	if _oauth_timer == null:
 		_oauth_timer = Timer.new()
@@ -1675,7 +1731,9 @@ func _schedule_oauth_poll() -> void:
 	_oauth_timer.start(_oauth_poll_interval)
 
 
+# Polls device authorization unless the sign-in code expired.
 func _on_oauth_poll_tick() -> void:
+	# Expired codes fail instead of polling forever
 	if not sign_in_active:
 		return
 	if Time.get_ticks_msec() > _oauth_deadline_msec:
@@ -1685,7 +1743,9 @@ func _on_oauth_poll_tick() -> void:
 	_send_oauth_poll()
 
 
+## Sends a device-token poll request to the OAuth endpoint.
 func _send_oauth_poll() -> void:
+	# Device-grant poll asks whether the user approved
 	_oauth_step = "poll"
 	var body := "grant_type=%s&device_code=%s&client_id=%s" % [
 		"urn:ietf:params:oauth:grant-type:device_code".uri_encode(),
@@ -1698,7 +1758,9 @@ func _send_oauth_poll() -> void:
 		sign_in_failed.emit("Lost connection during sign-in (error %d)." % err)
 
 
+## Mints an inference key from the device access token.
 func _send_key_mint() -> void:
+	# Exchange the device token for an inference key
 	_oauth_step = "mint"
 	var headers := PackedStringArray([
 		"Authorization: Bearer %s" % _oauth_access_token,
@@ -1709,10 +1771,9 @@ func _send_key_mint() -> void:
 		_fail_mint("Lost connection while minting the session key (error %d)." % err)
 
 
-# Step 4: transparent session refresh. Re-mints the inference key from the
-# stored device token (no browser needed). quiet=true is the background
-# boot refresh: failures keep the stored key and stay silent.
+## Re-mints the session key, preserving the old key when quiet fails.
 func refresh_session(quiet := false) -> void:
+	# Never overlap flows or mint without a device token
 	if sign_in_active or device_access_token.strip_edges().is_empty():
 		return
 	_refresh_quiet = quiet
@@ -1722,8 +1783,7 @@ func refresh_session(quiet := false) -> void:
 	_send_key_mint()
 
 
-# True when a Meta session exists but its key is older than the refresh
-# horizon (or was minted before step 4 tracked time).
+## Reports whether the session key is stale or its age unknown.
 func session_is_stale() -> bool:
 	if not meta_session or device_access_token.strip_edges().is_empty():
 		return false
@@ -1732,10 +1792,9 @@ func session_is_stale() -> bool:
 	return Time.get_unix_time_from_system() - session_minted_at > REFRESH_AFTER_SEC
 
 
-# 401 recovery for chat requests: one silent re-mint per request, then the
-# original send resumes with the fresh key. Returns true when a refresh
-# started (the caller must not fail the request yet).
+## Triggers one silent 401 refresh per request, delaying failure until done.
 func _maybe_refresh_session() -> bool:
+	# Only Meta sessions qualify, once per request
 	if not meta_session or device_access_token.strip_edges().is_empty():
 		return false
 	if _refreshed_this_request or sign_in_active:
@@ -1749,10 +1808,9 @@ func _maybe_refresh_session() -> bool:
 	return true
 
 
-# Single exit point for mint failures: background refreshes keep the old
-# key silently, request-triggered ones end the session loudly, and the
-# interactive flow reports sign-in failure.
+## Fails key minting via quiet keep, session expiry, or sign-in error.
 func _fail_mint(message: String) -> void:
+	# Snapshot the flow kind before clearing state
 	var resend := _refreshing_for_retry
 	var quiet := _refresh_quiet
 	_end_sign_in()
@@ -1761,6 +1819,7 @@ func _fail_mint(message: String) -> void:
 	if quiet:
 		print("[GdAI] Background session refresh failed (%s); keeping the stored key." % message)
 		return
+	# A failed retry-mint expires the session entirely
 	if resend:
 		busy = false
 		_expecting_response = false
@@ -1772,6 +1831,7 @@ func _fail_mint(message: String) -> void:
 		sign_in_failed.emit(message)
 
 
+# Routes OAuth responses to the matching device-flow step handler.
 func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	var step := _oauth_step
 	if not sign_in_active or step.is_empty() or step == "wait":
@@ -1780,6 +1840,7 @@ func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, bo
 	if result != OK:
 		_fail_mint("Network error during Meta sign-in (result %d)." % result)
 		return
+	# Tolerant parse; poll 400s carry flow errors, not failures
 	var parsed = JSON.parse_string(body.get_string_from_utf8())
 	var data: Dictionary = parsed if parsed is Dictionary else {}
 	if step == "poll" and code == 400 and data.has("error"):
@@ -1797,7 +1858,9 @@ func _on_oauth_completed(result: int, code: int, _headers: PackedStringArray, bo
 			_handle_key_mint(data, body)
 
 
+## Formats OAuth error detail from response fields or raw body.
 static func _oauth_error_detail(data: Dictionary, body: PackedByteArray) -> String:
+	# Prefer the most descriptive field, else a raw body snippet
 	for key in ["error_description", "error", "message"]:
 		var v := str(data.get(key, "")).strip_edges()
 		if not v.is_empty():
@@ -1808,7 +1871,9 @@ static func _oauth_error_detail(data: Dictionary, body: PackedByteArray) -> Stri
 	return ": %s" % text.left(120)
 
 
+## Stores the device code and schedules authorization polling.
 func _handle_device_code(data: Dictionary) -> void:
+	# All three codes are required to continue
 	var device_code := str(data.get("device_code", "")).strip_edges()
 	var user_code := str(data.get("user_code", "")).strip_edges()
 	var uri := str(data.get("verification_uri", "")).strip_edges()
@@ -1817,6 +1882,7 @@ func _handle_device_code(data: Dictionary) -> void:
 		_end_sign_in()
 		sign_in_failed.emit("Meta sign-in returned an incomplete device code.")
 		return
+	# Clamp the poll cadence and expiry to sane minimums
 	_oauth_device_code = device_code
 	_oauth_poll_interval = float(data.get("interval", 5.0))
 	if _oauth_poll_interval < 1.0:
@@ -1829,6 +1895,7 @@ func _handle_device_code(data: Dictionary) -> void:
 	_schedule_oauth_poll()
 
 
+## Handles poll errors by retrying, slowing, or failing sign-in.
 func _handle_oauth_poll_error(err: String, desc: String) -> void:
 	match err:
 		"authorization_pending":
@@ -1849,7 +1916,9 @@ func _handle_oauth_poll_error(err: String, desc: String) -> void:
 			sign_in_failed.emit("Meta sign-in error (%s%s)." % [name, detail])
 
 
+## Stores approved device tokens and starts key minting.
 func _handle_oauth_poll_success(data: Dictionary) -> void:
+	# Approval must yield an access token
 	var token := str(data.get("access_token", "")).strip_edges()
 	if token.is_empty():
 		_end_sign_in()
@@ -1861,11 +1930,14 @@ func _handle_oauth_poll_success(data: Dictionary) -> void:
 	_send_key_mint()
 
 
+## Saves the minted key and resumes the request or sign-in.
 func _handle_key_mint(data: Dictionary, body: PackedByteArray) -> void:
+	# Any usable key field counts; none fails the mint
 	var key := _extract_minted_key(data)
 	if key.is_empty():
 		_fail_mint("Key mint returned no usable key%s." % _oauth_error_detail(data, body))
 		return
+	# Activate the session and persist it for next boot
 	api_key = key
 	meta_session = true
 	session_minted_at = int(Time.get_unix_time_from_system())
@@ -1880,6 +1952,7 @@ func _handle_key_mint(data: Dictionary, body: PackedByteArray) -> void:
 		print("[GdAI] Session key refreshed (%s)." % fingerprint(api_key))
 	else:
 		print("[GdAI] Meta sign-in complete: inference key minted (%s)." % fingerprint(api_key))
+	# Retried chats resume; fresh sign-ins just succeed
 	if resend:
 		if gen != _request_generation:
 			busy = false
@@ -1890,9 +1963,9 @@ func _handle_key_mint(data: Dictionary, body: PackedByteArray) -> void:
 		sign_in_succeeded.emit()
 
 
-# The mint response shape is undocumented; accept the key under any usual
-# field name, top-level or nested under "data".
+## Extracts the minted key from any usual field, including nested data.
 static func _extract_minted_key(data: Dictionary) -> String:
+	# Try top-level fields, then the same names under data
 	for field in ["key", "api_key", "access_token", "token", "inference_key"]:
 		var v := str(data.get(field, "")).strip_edges()
 		if not v.is_empty():

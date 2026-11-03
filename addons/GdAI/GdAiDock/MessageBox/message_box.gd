@@ -8,8 +8,7 @@ signal retry_requested(message: MessageBox)
 @export var label: RichTextLabel
 @export var copy_button: BaseButton # Button or TextureButton
 @export var delete_button : BaseButton
-## AI-only regenerate button. Same layout sizing as copy_button; textures are
-## user-supplied via the scene, like the other action buttons.
+## AI-only regenerate button with copy_button sizing; textures user-supplied via scene.
 @export var retry_button : BaseButton
 @export var bubble: PanelContainer # inner bubble in the reworked scene; null in the legacy scene
 @export var segments: VBoxContainer # segment host; null until the scene adds it (legacy label path meanwhile)
@@ -54,7 +53,9 @@ var _flat_style := StyleBoxEmpty.new()
 var _mono_font: Font = null
 
 
+## Wires action buttons and hover funnel, then applies initial visual state.
 func _ready() -> void:
+	# Prefer segments; retire the legacy label when present.
 	if segments != null:
 		if label != null:
 			if label.get_parent() == segments:
@@ -66,9 +67,11 @@ func _ready() -> void:
 		_render_segments(_pending_text)
 	elif label != null:
 		label.text = render_markdown(_pending_text)
+	# Warn once when the bubble export is missing.
 	if bubble == null and get_class() != "PanelContainer" and not _bubble_warned:
 		_bubble_warned = true
 		push_warning("[GdAI] MessageBox bubble export is unassigned.")
+	# Wire copy button tooltip and signals.
 	if copy_button != null:
 		copy_button.tooltip_text = COPY_TOOLTIP
 		copy_button.pressed.connect(_on_copy_pressed)
@@ -76,6 +79,7 @@ func _ready() -> void:
 		copy_button.mouse_exited.connect(_on_copy_mouse_exited)
 		copy_button.button_down.connect(_on_copy_button_down)
 		copy_button.button_up.connect(_on_copy_button_up)
+	# Wire delete button tooltip and signals.
 	if delete_button != null:
 		delete_button.tooltip_text = DELETE_TOOLTIP
 		delete_button.pressed.connect(_on_delete_pressed)
@@ -83,6 +87,7 @@ func _ready() -> void:
 		delete_button.mouse_exited.connect(_on_delete_mouse_exited)
 		delete_button.button_down.connect(_on_delete_button_down)
 		delete_button.button_up.connect(_on_delete_button_up)
+	# Wire retry button tooltip and signals.
 	if retry_button != null:
 		retry_button.tooltip_text = RETRY_TOOLTIP
 		retry_button.pressed.connect(_on_retry_pressed)
@@ -90,8 +95,7 @@ func _ready() -> void:
 		retry_button.mouse_exited.connect(_on_retry_mouse_exited)
 		retry_button.button_down.connect(_on_retry_button_down)
 		retry_button.button_up.connect(_on_retry_button_up)
-	# Hover funnel: the engine notifies whichever child is under the cursor,
-	# so every hoverable part recomputes from geometry (order-independent).
+	# Hover funnel: every hoverable part recomputes hover from geometry (order-independent).
 	mouse_entered.connect(_queue_hover_refresh)
 	mouse_exited.connect(_queue_hover_refresh)
 	if bubble != null:
@@ -100,6 +104,7 @@ func _ready() -> void:
 	if label != null:
 		label.mouse_entered.connect(_queue_hover_refresh)
 		label.mouse_exited.connect(_queue_hover_refresh)
+	# Apply initial visual state now that exports resolved.
 	_apply_flat() # set_flat may have run before exports resolved
 	_apply_copy_visibility()
 	_apply_delete_visibility()
@@ -107,8 +112,10 @@ func _ready() -> void:
 	_apply_usage()
 
 
+## Stores raw message markdown and renders it into segments or label.
 func set_message_text(text: String) -> void:
 	_pending_text = text # raw markdown: clipboard and history keep this
+	# Render into segments, or fall back to the legacy label.
 	if segments != null:
 		_render_segments(text)
 	elif label != null:
@@ -117,26 +124,29 @@ func set_message_text(text: String) -> void:
 		copy_button.tooltip_text = COPY_TOOLTIP
 
 
-# Split raw text into [{code: bool, text: String, lang: String}] on ```
-# fences. Empty parts are dropped; an unclosed fence (mid-stream) runs to
-# the end.
+## Splits markdown on fences, dropping empties with unclosed fences running to end.
 static func split_markdown(text: String) -> Array:
+	# Accumulate parts while tracking fence state and language.
 	var parts: Array = []
 	var buf: Array[String] = []
 	var in_code := false
 	var lang := ""
+	# Walk lines, toggling code mode on each fence.
 	for line in text.split("\n"):
 		if line.strip_edges().begins_with("```"):
 			_flush_part(parts, buf, in_code, lang)
+			# Opening fence records its language tag.
 			if not in_code:
 				lang = line.strip_edges().substr(3).strip_edges()
 			in_code = not in_code
 		else:
 			buf.append(line)
+	# Flush the trailing block; unclosed fences run to end.
 	_flush_part(parts, buf, in_code, lang)
 	return parts
 
 
+## Appends buffered lines as one markdown part unless the buffer is empty.
 static func _flush_part(parts: Array, buf: Array[String], was_code: bool, lang: String) -> void:
 	if buf.is_empty():
 		return
@@ -144,14 +154,12 @@ static func _flush_part(parts: Array, buf: Array[String], was_code: bool, lang: 
 	buf.clear()
 
 
+## Escapes square brackets so text cannot inject BBCode tags.
 static func _escape_bbcode(s: String) -> String:
 	return s.replace("[", "\\[").replace("]", "\\]")
 
 
-# Per-language lexer config: keywords, line-comment marker, block-comment
-# pair, single-line string quotes, triple-quote openers (checked first).
-# Unknown languages return {} and render as plain escaped code — never
-# mis-highlighted under a guessed grammar.
+## Returns language lexer config, or empty dict so unknown languages stay plain.
 static func _lang_spec(lang: String) -> Dictionary:
 	match lang:
 		"gdscript", "gd":
@@ -221,15 +229,13 @@ static func _lang_spec(lang: String) -> Dictionary:
 	return {}
 
 
-# Highlight one fence body as BBCode. A single linear pass (it re-runs on
-# every stream update); unclosed strings/comments run to end-of-input so
-# mid-stream text stays valid, and brackets are always escaped so code can
-# never inject tags. Beyond keywords/strings/comments/numbers: word( calls,
-# .members, @annotations, and $NodePaths get their own colors.
+## Highlights one code fence as BBCode with brackets escaped so code never injects tags.
 static func highlight_code(code: String, lang: String) -> String:
+	# Look up the lexer; unknown languages stay plain.
 	var spec := _lang_spec(lang.strip_edges().to_lower())
 	if spec.is_empty():
 		return _escape_bbcode(code)
+	# Unpack lexer config and output cursor.
 	var keywords: Array = spec["keywords"]
 	var line_c := str(spec.get("line", ""))
 	var block: Array = spec.get("block", [])
@@ -238,7 +244,9 @@ static func highlight_code(code: String, lang: String) -> String:
 	var out: Array[String] = []
 	var i := 0
 	var n := code.length()
+	# Scan the code, emitting one highlighted span per step.
 	while i < n:
+		# Line comment runs to the end of the line.
 		if line_c != "" and code.substr(i, line_c.length()) == line_c:
 			var eol := code.find("\n", i)
 			if eol < 0:
@@ -246,6 +254,7 @@ static func highlight_code(code: String, lang: String) -> String:
 			out.append("[color=" + HL_COMMENT + "][i]" + _escape_bbcode(code.substr(i, eol - i)) + "[/i][/color]")
 			i = eol
 			continue
+		# Block comment runs to its closer or end of input.
 		if not block.is_empty() and code.substr(i, str(block[0]).length()) == str(block[0]):
 			var close := str(block[1])
 			var bend := code.find(close, i + str(block[0]).length())
@@ -256,16 +265,19 @@ static func highlight_code(code: String, lang: String) -> String:
 			out.append("[color=" + HL_COMMENT + "][i]" + _escape_bbcode(code.substr(i, bend - i)) + "[/i][/color]")
 			i = bend
 			continue
+		# Triple-quoted string is one literal span.
 		var tri_end := _triple_end(code, i, triples)
 		if tri_end >= 0:
 			out.append("[color=" + HL_STRING + "]" + _escape_bbcode(code.substr(i, tri_end - i)) + "[/color]")
 			i = tri_end
 			continue
+		# Single-line quoted string.
 		if quotes.has(code[i]):
 			var lit := _scan_string(code, i)
 			out.append("[color=" + HL_STRING + "]" + _escape_bbcode(lit) + "[/color]")
 			i += lit.length()
 			continue
+		# Dollar prefix: interpolated string or node path.
 		if code[i] == "$" and i + 1 < n:
 			if code[i + 1] == "\"":
 				var qs := _scan_string(code, i + 1)
@@ -279,6 +291,7 @@ static func highlight_code(code: String, lang: String) -> String:
 				out.append("[color=" + HL_MEMBER + "]" + _escape_bbcode(code.substr(i, m - i)) + "[/color]")
 				i = m
 				continue
+		# Annotation word.
 		if code[i] == "@" and i + 1 < n and _is_ident_start(code[i + 1]):
 			var a := i + 1
 			while a < n and _is_ident(code[a]):
@@ -286,11 +299,13 @@ static func highlight_code(code: String, lang: String) -> String:
 			out.append("[color=" + HL_KEYWORD + "]" + _escape_bbcode(code.substr(i, a - i)) + "[/color]")
 			i = a
 			continue
+		# Word or number starting here.
 		if _is_ident_start(code[i]) or _is_digit(code[i]):
 			var w := i
 			while w < n and _is_ident(code[w]):
 				w += 1
 			var word := code.substr(i, w - i)
+			# Number, member, keyword, call, or plain word.
 			if _is_digit(word[0]):
 				var tail := _re("^(\\.\\d[\\d_]*)?([eE][+-]?\\d[\\d_]*)?").search(code.substr(w)).get_string(0)
 				word += tail
@@ -309,19 +324,21 @@ static func highlight_code(code: String, lang: String) -> String:
 				out.append(_escape_bbcode(word))
 			i = w
 			continue
+		# Plain character with no special meaning.
 		out.append(_escape_bbcode(code[i]))
 		i += 1
 	return "".join(out)
 
 
-# End index (exclusive) of the triple-quoted string opening at i, or -1 when
-# no triple opener matches there. Unclosed runs to end-of-input.
+## Returns exclusive end of the triple-quoted string at i, unclosed ending input, else -1.
 static func _triple_end(code: String, i: int, triples: Array) -> int:
+	# Try each triple-quote opener at this position.
 	for t in triples:
 		var opener := str(t)
 		if code.substr(i, opener.length()) == opener:
 			var n := code.length()
 			var j := i + opener.length()
+			# Scan to the matching closer, skipping escapes.
 			while j < n:
 				if code[j] == "\\":
 					j += 2
@@ -329,13 +346,14 @@ static func _triple_end(code: String, i: int, triples: Array) -> int:
 				if code.substr(j, opener.length()) == opener:
 					return j + opener.length()
 				j += 1
+			# Unclosed string runs to end of input.
 			return n
 	return -1
 
 
-# Raw substring of the single-line string whose opening quote is at i:
-# backslash escapes honored, closing quote included, unclosed runs to EOL.
+## Scans single-line string at i honoring escapes, unclosed runs reaching line end.
 static func _scan_string(code: String, i: int) -> String:
+	# Scan to the closing quote, line end, or input end.
 	var q := code[i]
 	var j := i + 1
 	var n := code.length()
@@ -343,35 +361,43 @@ static func _scan_string(code: String, i: int) -> String:
 		if code[j] == "\\":
 			j += 1
 		j += 1
+	# Include the closing quote when present.
 	if j < n and code[j] == q:
 		j += 1
 	return code.substr(i, j - i)
 
 
+## Reports whether an identifier end is followed by an opening parenthesis.
 static func _followed_by_paren(code: String, w: int) -> bool:
+	# Skip spaces, then test for an open paren.
 	var p := w
 	while p < code.length() and (code[p] == " " or code[p] == "\t"):
 		p += 1
 	return p < code.length() and code[p] == "("
 
 
+## Reports whether a character is an ASCII decimal digit.
 static func _is_digit(c: String) -> bool:
 	return c >= "0" and c <= "9"
 
 
+## Reports whether a character can start an identifier.
 static func _is_ident_start(c: String) -> bool:
 	return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
 
 
+## Reports whether a character can continue an identifier.
 static func _is_ident(c: String) -> bool:
 	return _is_ident_start(c) or _is_digit(c)
 
 
-# Legacy single-label path: fences to BBCode (prose markdown-lite, code escaped).
+## Renders markdown to BBCode for the legacy single-label path.
 static func render_markdown(text: String) -> String:
+	# Fast path when there are no code fences.
 	if not text.contains("```"):
 		return markdown_lite(text)
 	var out: Array[String] = []
+	# Render each part as code or prose.
 	for part in split_markdown(text):
 		var d: Dictionary = part
 		if bool(d.get("code", false)):
@@ -381,12 +407,12 @@ static func render_markdown(text: String) -> String:
 	return "\n".join(out)
 
 
-# Markdown-lite for prose: headers, lists, links, bold, italic, inline code.
-# Single-underscore and double-underscore marks are deliberately unsupported
-# (snake_case and __dunder__ names must survive). No tables/quotes/hr (yet).
+## Formats prose markdown while leaving single and double underscores untouched.
 static func markdown_lite(text: String) -> String:
 	var out: Array[String] = []
+	# Match headings, bullets, and numbered items with indent.
 	var block_re := _re("^([ \\t]*)(#{1,6}|[-*]|\\d+\\.)[ \\t]+(.*)$")
+	# Convert each line, passing plain lines through inline formatting.
 	for line in text.split("\n"):
 		var m := block_re.search(line)
 		if m == null:
@@ -395,6 +421,7 @@ static func markdown_lite(text: String) -> String:
 		var indent: String = m.get_string(1)
 		var marker: String = m.get_string(2)
 		var content := _md_inline(m.get_string(3))
+		# Headings shrink by level; deep ones fall back to bold.
 		if marker.begins_with("#"):
 			var level := marker.length()
 			if level <= 3:
@@ -402,6 +429,7 @@ static func markdown_lite(text: String) -> String:
 				out.append("[font_size=%d][b]%s[/b][/font_size]" % [size, content])
 			else:
 				out.append("[b]%s[/b]" % content)
+		# List items indent by depth, capped to avoid runaway nesting.
 		elif marker == "-" or marker == "*":
 			out.append("\t".repeat(1 + mini(indent.length() / 2, 4)) + "• " + content)
 		else:
@@ -409,9 +437,9 @@ static func markdown_lite(text: String) -> String:
 	return "\n".join(out)
 
 
+## Applies inline markdown with code spans protected before other passes.
 static func _md_inline(line: String) -> String:
-	# Code spans first, stashed behind private-use placeholders so their
-	# contents (and their brackets) survive the passes below untouched.
+	# Stash code spans behind placeholders so later passes leave them untouched.
 	var mark := String.chr(0xE000)
 	var spans: Array[String] = []
 	var code_re := _re("`([^`\n]+)`")
@@ -421,16 +449,20 @@ static func _md_inline(line: String) -> String:
 		spans.append(m.get_string(1))
 		out = out.substr(0, m.get_start()) + mark + str(spans.size() - 1) + mark + out.substr(m.get_end())
 		m = code_re.search(out)
+	# Links first, then bold-italic, bold, and italic passes.
 	out = _re("\\[([^\\[\\]]+)\\]\\(([^)\\s]+)\\)").sub(out, "[url=$2]$1[/url]", true)
 	out = _re("\\*\\*\\*(.+?)\\*\\*\\*").sub(out, "[b][i]$1[/i][/b]", true)
 	out = _re("\\*\\*(.+?)\\*\\*").sub(out, "[b]$1[/b]", true)
 	out = _re("\\*([^\\*\\n]+)\\*").sub(out, "[i]$1[/i]", true)
+	# Restore protected code spans as escaped code tags.
 	for i in spans.size():
 		out = out.replace(mark + str(i) + mark, "[code]" + _escape_bbcode(spans[i]) + "[/code]")
 	return out
 
 
+## Returns a cached compiled regular expression for a pattern.
 static func _re(pattern: String) -> RegEx:
+	# Compile once per pattern, then reuse.
 	if not _re_cache.has(pattern):
 		var r := RegEx.new()
 		r.compile(pattern)
@@ -438,11 +470,13 @@ static func _re(pattern: String) -> RegEx:
 	return _re_cache[pattern]
 
 
-# Segmented path: prose labels plus real PanelContainers for code.
+## Rebuilds segments as prose labels plus panel containers for code.
 func _render_segments(raw: String) -> void:
+	# Clear previously built segments.
 	for c in segments.get_children():
 		segments.remove_child(c)
 		c.queue_free()
+	# Build a prose label or code panel per part.
 	for part in split_markdown(raw):
 		var d: Dictionary = part
 		if bool(d.get("code", false)):
@@ -451,7 +485,9 @@ func _render_segments(raw: String) -> void:
 			segments.add_child(_make_prose_label(str(d.get("text", ""))))
 
 
+## Builds a selectable prose label rendering markdown-lite text.
 func _make_prose_label(prose: String) -> RichTextLabel:
+	# Configure a selectable label rendering markdown-lite.
 	var l := RichTextLabel.new()
 	l.bbcode_enabled = true
 	l.text = markdown_lite(prose)
@@ -460,15 +496,19 @@ func _make_prose_label(prose: String) -> RichTextLabel:
 	l.selection_enabled = true
 	l.focus_mode = Control.FOCUS_CLICK
 	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Flat style removes label chrome.
 	if _flat:
 		l.add_theme_stylebox_override("normal", _flat_style)
 		l.add_theme_stylebox_override("focus", _flat_style)
+	# Funnel hover to the message refresh.
 	l.mouse_entered.connect(_queue_hover_refresh)
 	l.mouse_exited.connect(_queue_hover_refresh)
 	return l
 
 
+## Builds a styled code panel with header, copy button, and highlighting.
 func _make_code_block(code_text: String, lang: String) -> PanelContainer:
+	# Dark rounded panel holding the code block.
 	var panel := PanelContainer.new()
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = CODE_BG_COLOR
@@ -477,6 +517,7 @@ func _make_code_block(code_text: String, lang: String) -> PanelContainer:
 	sb.border_color = CODE_BORDER
 	panel.add_theme_stylebox_override("panel", sb)
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Padded vertical layout for the header and code.
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 10)
 	margin.add_theme_constant_override("margin_top", 8)
@@ -484,18 +525,21 @@ func _make_code_block(code_text: String, lang: String) -> PanelContainer:
 	margin.add_theme_constant_override("margin_bottom", 8)
 	var vbox := VBoxContainer.new()
 	var header := HBoxContainer.new()
+	# Show the language tag when the fence names one.
 	if not lang.is_empty():
 		var lang_label := Label.new()
 		lang_label.text = lang
 		lang_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.62))
 		lang_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		header.add_child(lang_label)
+	# Spacer pushes the copy button to the right.
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	header.add_child(spacer)
 	header.add_child(_make_code_copy_button(code_text))
 	vbox.add_child(header)
+	# Highlighted selectable code label in monospace.
 	var l := RichTextLabel.new()
 	l.bbcode_enabled = true # highlighted code: highlight_code escapes brackets
 	l.text = highlight_code(code_text, lang)
@@ -509,6 +553,7 @@ func _make_code_block(code_text: String, lang: String) -> PanelContainer:
 	vbox.add_child(l)
 	margin.add_child(vbox)
 	panel.add_child(margin)
+	# Funnel hover from panel and label to the message refresh.
 	panel.mouse_entered.connect(_queue_hover_refresh)
 	panel.mouse_exited.connect(_queue_hover_refresh)
 	l.mouse_entered.connect(_queue_hover_refresh)
@@ -520,8 +565,10 @@ const CODE_COPY_ICON_PATH := "res://addons/GdAI/GdAiDock/MessageBox/code_copy_ic
 const CODE_COPY_HOVER_PATH := "res://addons/GdAI/GdAiDock/MessageBox/code_copy_icon_hover.png"
 
 
+## Builds the code copy button with icon fallback and signal wiring.
 func _make_code_copy_button(code_text: String) -> BaseButton:
 	var btn: BaseButton
+	# Prefer the icon button; fall back to a text button.
 	if ResourceLoader.exists(CODE_COPY_ICON_PATH):
 		var t := TextureButton.new()
 		t.texture_normal = load(CODE_COPY_ICON_PATH) as Texture2D
@@ -535,6 +582,7 @@ func _make_code_copy_button(code_text: String) -> BaseButton:
 		var b := Button.new()
 		b.text = "Copy"
 		btn = b
+	# Wire tooltip and press/hover signals.
 	btn.tooltip_text = "Copy code"
 	btn.pressed.connect(_on_code_copy_pressed.bind(code_text, btn))
 	btn.mouse_entered.connect(_on_code_copy_hover.bind(btn, true))
@@ -544,17 +592,21 @@ func _make_code_copy_button(code_text: String) -> BaseButton:
 	return btn
 
 
+# Copies the code block text and confirms via tooltip.
 func _on_code_copy_pressed(code_text: String, btn: BaseButton) -> void:
 	DisplayServer.clipboard_set(code_text)
 	btn.tooltip_text = "Copied!"
 
 
+# Tints the code copy button on hover and refreshes hover state.
 func _on_code_copy_hover(btn: BaseButton, hovering: bool) -> void:
 	btn.modulate = ACTION_MODULATE_HOVER if hovering else ACTION_MODULATE_NORMAL
 	_queue_hover_refresh()
 
 
+# Tints the code copy button while pressed using cursor geometry.
 func _on_code_copy_press(btn: BaseButton, pressed: bool) -> void:
+	# Pressed dims; release retints from cursor position.
 	if pressed:
 		btn.modulate = ACTION_MODULATE_PRESSED
 	else:
@@ -562,6 +614,7 @@ func _on_code_copy_press(btn: BaseButton, pressed: bool) -> void:
 		btn.modulate = ACTION_MODULATE_HOVER if over else ACTION_MODULATE_NORMAL
 
 
+## Returns the cached monospace font, creating it on first use.
 func _mono_font_cached() -> Font:
 	if _mono_font == null:
 		var mono := SystemFont.new()
@@ -570,22 +623,20 @@ func _mono_font_cached() -> Font:
 	return _mono_font
 
 
+## Appends a streamed chunk to pending text and legacy label.
 func append_message_text(chunk: String) -> void:
 	_pending_text += chunk
 	if label != null:
 		label.append_text(chunk)
 
 
-# Flat mode drops the bubble background (AI flow): the panel stylebox plus the
-# label's own normal/focus backgrounds. The MarginContainer keeps text
-# padding. Non-flat restores the themed bubble (user messages).
+## Toggles flat bubble styling for AI flow versus themed user messages.
 func set_flat(flat: bool) -> void:
 	_flat = flat
 	_apply_flat()
 
 
-# Reworked scene: the bubble export. Legacy scene: the root itself (the
-# static type can't express the legacy root, hence the native-class check).
+## Resolves the bubble panel from the export or the legacy root.
 func _message_panel() -> PanelContainer:
 	if bubble != null:
 		return bubble
@@ -594,8 +645,10 @@ func _message_panel() -> PanelContainer:
 	return null
 
 
+## Applies or clears flat styling and refreshes action button visibility.
 func _apply_flat() -> void:
 	var panel := _message_panel()
+	# Flat swaps in the empty style; themed removes it.
 	if _flat:
 		if panel != null:
 			panel.add_theme_stylebox_override("panel", _flat_style)
@@ -608,50 +661,50 @@ func _apply_flat() -> void:
 		if label != null:
 			label.remove_theme_stylebox_override("normal")
 			label.remove_theme_stylebox_override("focus")
-	# Flat decides which action buttons can ever show; refresh collapse state
-	# so a flat change never leaves a stale slot behind.
+	# Flat gates which buttons can show; refresh so no stale slot survives a flat change.
 	_apply_copy_visibility()
 	_apply_delete_visibility()
 	_apply_retry_visibility()
 
 
+## Reports whether flat bubble styling is currently enabled.
 func is_flat() -> bool:
 	return _flat
 
 
-# Copy button shows on AI responses only; null-safe until the scene wires it.
+## Marks copy availability for AI responses, null-safe before scene wiring.
 func set_copy_visible(v: bool) -> void:
 	_copy_visible = v
 	_apply_copy_visibility()
 
 
+## Updates copy button reveal without shifting chat layout.
 func _apply_copy_visibility() -> void:
 	if copy_button == null:
 		return
 	# AI (flat): pinned by copy-ready state. User: revealed on hover only.
 	_copy_shown = _copy_visible if _flat else _hover
-	# Layout-stable: the button always holds its slot; transparency + mouse
-	# filter hide it, so toggling never shifts the chat.
+	# Button always holds its slot; transparency + mouse filter hide it without shifting chat.
 	copy_button.visible = true
 	copy_button.mouse_filter = Control.MOUSE_FILTER_STOP if _copy_shown else Control.MOUSE_FILTER_IGNORE
 	_refresh_copy_modulate(false)
 	_apply_retry_visibility() # copy-ready is also the retry finality gate
 
 
+## Reports whether the copy button is currently revealed.
 func is_copy_shown() -> bool:
 	return _copy_shown
 
 
-# Hover truth comes from geometry, not event order: any enter/exit on any
-# part recomputes whether the mouse is over the message or its buttons.
-# Runs twice: immediately (same-frame probes and the common case) plus
-# deferred (mouse position can lag signal dispatch by an event).
+# Recomputes hover from geometry immediately and deferred, ignoring event order.
 func _queue_hover_refresh() -> void:
 	_refresh_hover()
 	_refresh_hover.call_deferred()
 
 
+## Recomputes hover from cursor geometry and refreshes button visibility.
 func _refresh_hover() -> void:
+	# Hover covers the message rect plus any shown button.
 	var mouse := get_global_mouse_position()
 	_hover = _covers_button(copy_button, _copy_shown, mouse) or _covers_button(delete_button, _delete_shown, mouse) or _covers_button(retry_button, _retry_shown, mouse) or get_global_rect().grow(HOVER_SLOP_PX).has_point(mouse)
 	_apply_copy_visibility()
@@ -659,144 +712,160 @@ func _refresh_hover() -> void:
 	_apply_retry_visibility()
 
 
+## Reports whether the cursor covers a shown button within slop.
 static func _covers_button(button: BaseButton, shown: bool, mouse: Vector2) -> bool:
 	return button != null and shown and button.get_global_rect().grow(HOVER_SLOP_PX).has_point(mouse)
 
 
+## Reports whether copy is available for this message.
 func is_copy_visible() -> bool:
 	return _copy_visible
 
 
+# Copies raw message text and confirms via tooltip.
 func _on_copy_pressed() -> void:
 	DisplayServer.clipboard_set(_pending_text)
 	if copy_button != null:
 		copy_button.tooltip_text = "Copied!"
 
 
-# Hover/press feedback without extra textures: brighten on hover, dim while
-# held. All four signals pass 0 args, matching these handlers.
+# Brightens the copy button on hover and refreshes hover state.
 func _on_copy_mouse_entered() -> void:
 	_copy_hover = true
 	_refresh_copy_modulate(false)
 	_queue_hover_refresh()
 
 
+# Restores copy button tint on hover exit and refreshes hover.
 func _on_copy_mouse_exited() -> void:
 	_copy_hover = false
 	_refresh_copy_modulate(false)
 	_queue_hover_refresh()
 
 
+# Dims the copy button while it is held down.
 func _on_copy_button_down() -> void:
 	_refresh_copy_modulate(true)
 
 
+# Restores copy button tint after the press is released.
 func _on_copy_button_up() -> void:
 	_refresh_copy_modulate(false)
 
 
+## Refreshes copy button tint and transparency from hover and reveal state.
 func _refresh_copy_modulate(pressed: bool) -> void:
 	if copy_button == null:
 		return
+	# Pressed beats hover beats normal tint.
 	var c := ACTION_MODULATE_NORMAL
 	if pressed:
 		c = ACTION_MODULATE_PRESSED
 	elif _copy_hover:
 		c = ACTION_MODULATE_HOVER
+	# Hidden buttons stay transparent while holding layout.
 	c.a = 1.0 if _copy_shown else 0.0
 	copy_button.modulate = c
 
 
-# Delete reveals on user-message hover exactly like the user copy button; it
-# never shows on AI responses.
+## Reveals delete on user-message hover, never showing on AI responses.
 func _apply_delete_visibility() -> void:
 	if delete_button == null:
 		return
 	_delete_shown = (not _flat) and _hover
-	# User rows hold the slot (hover reveals must not reflow the chat); AI
-	# rows can never show delete, so the slot collapses instead of gaping.
+	# User rows hold the slot (hover reveals never reflow); AI rows collapse it since delete never shows.
 	delete_button.visible = not _flat
 	delete_button.mouse_filter = Control.MOUSE_FILTER_STOP if _delete_shown else Control.MOUSE_FILTER_IGNORE
 	_refresh_delete_modulate(false)
 
 
+## Reports whether the delete button is currently revealed.
 func is_delete_shown() -> bool:
 	return _delete_shown
 
 
-# Retry shows only on the last AI message and only once its turn is final
-# (_copy_visible is the finality flag, so Thinking/awaiting/streaming turns
-# never offer retry). User messages never show it. Layout-stable like copy.
+## Marks this box the last AI message so final turns offer retry.
 func set_retry_last(v: bool) -> void:
 	_retry_last = v
 	_apply_retry_visibility()
 
 
+## Updates retry button reveal for final turns on the last AI message.
 func _apply_retry_visibility() -> void:
 	if retry_button == null:
 		return
 	_retry_shown = _flat and _retry_last and _copy_visible
-	# AI rows hold the slot (last-flag moves must not reflow); user rows can
-	# never show retry, so the slot collapses instead of gaping.
+	# AI rows hold the slot (last-flag moves never reflow); user rows collapse it since retry never shows.
 	retry_button.visible = _flat
 	retry_button.mouse_filter = Control.MOUSE_FILTER_STOP if _retry_shown else Control.MOUSE_FILTER_IGNORE
 	_refresh_retry_modulate(false)
 
 
+## Reports whether the retry button is currently revealed.
 func is_retry_shown() -> bool:
 	return _retry_shown
 
 
+# Emits a retry request for this message box.
 func _on_retry_pressed() -> void:
 	retry_requested.emit(self)
 
 
+# Brightens the retry button on hover and refreshes hover state.
 func _on_retry_mouse_entered() -> void:
 	_retry_hover = true
 	_refresh_retry_modulate(false)
 	_queue_hover_refresh()
 
 
+# Restores retry button tint on hover exit and refreshes hover.
 func _on_retry_mouse_exited() -> void:
 	_retry_hover = false
 	_refresh_retry_modulate(false)
 	_queue_hover_refresh()
 
 
+# Dims the retry button while it is held down.
 func _on_retry_button_down() -> void:
 	_refresh_retry_modulate(true)
 
 
+# Restores retry button tint after the press is released.
 func _on_retry_button_up() -> void:
 	_refresh_retry_modulate(false)
 
 
+## Refreshes retry button tint and transparency from hover and reveal state.
 func _refresh_retry_modulate(pressed: bool) -> void:
 	if retry_button == null:
 		return
+	# Pressed beats hover beats normal tint.
 	var c := ACTION_MODULATE_NORMAL
 	if pressed:
 		c = ACTION_MODULATE_PRESSED
 	elif _retry_hover:
 		c = ACTION_MODULATE_HOVER
+	# Hidden buttons stay transparent while holding layout.
 	c.a = 1.0 if _retry_shown else 0.0
 	retry_button.modulate = c
 
 
-# Per-turn token usage, shown under AI responses once the turn completes.
-# Hidden until set (user messages never set it).
+## Records per-turn token usage shown under completed AI responses.
 func set_usage(prompt_tokens: int, completion_tokens: int) -> void:
 	_usage = {"prompt": prompt_tokens, "completion": completion_tokens}
 	_apply_usage()
 
 
+## Returns stored per-turn token usage as a dictionary.
 func get_usage() -> Dictionary:
 	return _usage
 
 
+## Shows formatted token usage or hides the label when unset.
 func _apply_usage() -> void:
 	if usage_label == null:
 		return
+	# Hide the label until usage is recorded.
 	if _usage.is_empty():
 		usage_label.visible = false
 		return
@@ -804,11 +873,14 @@ func _apply_usage() -> void:
 	usage_label.visible = true
 
 
+## Formats token counts as a compact input-output usage string.
 static func format_usage(prompt_tokens: int, completion_tokens: int) -> String:
 	return "%s in · %s out" % [_fmt_k(prompt_tokens), _fmt_k(completion_tokens)]
 
 
+## Formats a token count compactly using a kilounit suffix.
 static func _fmt_k(n: int) -> String:
+	# Exact below 1k; trimmed k-suffix above.
 	if n < 1000:
 		return str(n)
 	if n % 1000 == 0:
@@ -816,37 +888,45 @@ static func _fmt_k(n: int) -> String:
 	return "%.1fk" % (float(n) / 1000.0)
 
 
+# Emits a delete request for this message box.
 func _on_delete_pressed() -> void:
 	delete_requested.emit(self)
 
 
+# Brightens the delete button on hover and refreshes hover state.
 func _on_delete_mouse_entered() -> void:
 	_delete_hover = true
 	_refresh_delete_modulate(false)
 	_queue_hover_refresh()
 
 
+# Restores delete button tint on hover exit and refreshes hover.
 func _on_delete_mouse_exited() -> void:
 	_delete_hover = false
 	_refresh_delete_modulate(false)
 	_queue_hover_refresh()
 
 
+# Dims the delete button while it is held down.
 func _on_delete_button_down() -> void:
 	_refresh_delete_modulate(true)
 
 
+# Restores delete button tint after the press is released.
 func _on_delete_button_up() -> void:
 	_refresh_delete_modulate(false)
 
 
+## Refreshes delete button tint and transparency from hover and reveal state.
 func _refresh_delete_modulate(pressed: bool) -> void:
 	if delete_button == null:
 		return
+	# Pressed beats hover beats normal tint.
 	var c := ACTION_MODULATE_NORMAL
 	if pressed:
 		c = ACTION_MODULATE_PRESSED
 	elif _delete_hover:
 		c = ACTION_MODULATE_HOVER
+	# Hidden buttons stay transparent while holding layout.
 	c.a = 1.0 if _delete_shown else 0.0
 	delete_button.modulate = c
