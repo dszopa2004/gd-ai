@@ -77,6 +77,7 @@ var _stream_tool_calls: Dictionary = {}
 var _stream_finish_reason := ""
 var _stream_tool_announced := false
 var _history_dropped := 0
+var last_usage: Dictionary = {} # tokens of the latest completed turn; dock reads after response/tool signals
 var _oauth_http: HTTPRequest
 var _oauth_step := "" # "code" | "poll" | "mint" while awaiting that response ("wait" between polls)
 var _oauth_device_code := ""
@@ -225,6 +226,7 @@ func _send_with_options(messages: Array, reset_fallback: bool) -> void:
 
 # Start a request to AI
 func _start_request() -> void:
+	last_usage = {} # reset per attempt (fresh sends, retries, fallback re-entry)
 	var key := _sanitize_key(api_key) # Sanitize key
 
 	# Handle no API key set
@@ -650,6 +652,7 @@ func _send_stream(messages: Array, key: String) -> void:
 		"reasoning_effort": reasoning_effort,
 		"max_completion_tokens": max_completion_tokens,
 		"stream": true,
+		"stream_options": {"include_usage": true},
 	}
 	_apply_tool_fields(payload)
 	_stream_body = JSON.stringify(payload)
@@ -782,6 +785,17 @@ func _append_stream_text(text: String) -> void:
 		_handle_sse_line(lines[i].strip_edges())
 
 
+# Normalize a response usage block into ints; ignored when absent/empty.
+func _capture_usage(parsed: Dictionary) -> void:
+	var u = parsed.get("usage", {})
+	if u is Dictionary and not (u as Dictionary).is_empty():
+		last_usage = {
+			"prompt_tokens": int((u as Dictionary).get("prompt_tokens", 0)),
+			"completion_tokens": int((u as Dictionary).get("completion_tokens", 0)),
+			"total_tokens": int((u as Dictionary).get("total_tokens", 0)),
+		}
+
+
 # Handle SSE
 func _handle_sse_line(line: String) -> void:
 	if line.is_empty() or line.begins_with(":"):
@@ -800,6 +814,7 @@ func _handle_sse_line(line: String) -> void:
 	if parsed.get("error") != null:
 		_finish_stream_error(_stream_error_message(parsed["error"]))
 		return
+	_capture_usage(parsed) # first: usage-only chunks carry no choices
 	var choices = parsed.get("choices", [])
 	if not choices is Array or choices.is_empty():
 		return
@@ -1475,6 +1490,7 @@ func _on_request_completed(result: int, code: int, headers: PackedStringArray, b
 	if not parsed is Dictionary:
 		request_failed.emit("Unexpected response from server.")
 		return
+	_capture_usage(parsed)
 
 	# Get choices from response
 	var choices = parsed.get("choices", [])

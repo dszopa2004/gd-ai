@@ -302,11 +302,22 @@ func _on_ai_response(text: String) -> void:
 	if pending_ai_message != null and is_instance_valid(pending_ai_message):
 		pending_ai_message.set_message_text(text)
 		pending_ai_message.set_copy_visible(true)
+		_apply_turn_usage()
 	pending_ai_message = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", text)
 	_end_loop() # plain-text reply: the model is done acting
 	_on_user_input_box_text_changed()
+
+
+# Stamp the pending message with the completed turn's token usage (if the
+# endpoint reported any); must run while pending_ai_message is still valid.
+func _apply_turn_usage() -> void:
+	if pending_ai_message == null or not is_instance_valid(pending_ai_message):
+		return
+	if client == null or client.last_usage.is_empty():
+		return
+	pending_ai_message.set_usage(int(client.last_usage.get("prompt_tokens", 0)), int(client.last_usage.get("completion_tokens", 0)))
 
 
 # Structured actions: safe turns auto-run (the loop continues click-free);
@@ -365,6 +376,7 @@ func _on_ai_tool_calls(calls: Array, preamble: String) -> void:
 		pending_ai_message.set_message_text(rendered)
 		if not needs_approval:
 			pending_ai_message.set_copy_visible(true) # awaiting-approval resolves later
+		_apply_turn_usage()
 	var history_ref = null
 	if not current_chat.is_empty() and current_chat.has("messages"):
 		_record_message("assistant", rendered)

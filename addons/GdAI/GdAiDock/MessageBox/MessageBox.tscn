@@ -6,7 +6,7 @@
 [ext_resource type="Texture2D" uid="uid://blyjj0fgpncoe" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon.png" id="4_fo1ca"]
 [ext_resource type="Texture2D" uid="uid://3nqrrkiq72hi" path="res://addons/GdAI/GdAiDock/MessageBox/delete_icon_hover.png" id="5_o4qow"]
 
-[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("copy_button", "delete_button", "bubble", "segments")]
+[node name="MessageBox" type="VBoxContainer" unique_id=2051221015 node_paths=PackedStringArray("copy_button", "delete_button", "bubble", "segments", "usage_label")]
 anchors_preset = 10
 anchor_right = 1.0
 offset_bottom = 78.0
@@ -16,6 +16,7 @@ copy_button = NodePath("HBoxContainer/CopyButton")
 delete_button = NodePath("HBoxContainer/DeleteButton")
 bubble = NodePath("Bubble")
 segments = NodePath("Bubble/VBoxContainer/MarginContainer/Segments")
+usage_label = NodePath("HBoxContainer/UsageLabel")
 
 [node name="Bubble" type="PanelContainer" parent="." unique_id=1338042059]
 layout_mode = 2
@@ -42,7 +43,6 @@ layout_mode = 2
 modulate = Color(1, 1, 1, 0)
 custom_minimum_size = Vector2(32, 32)
 layout_mode = 2
-size_flags_horizontal = 0
 tooltip_text = "Copy response"
 mouse_filter = 2
 texture_normal = ExtResource("2_iia4p")
@@ -54,10 +54,15 @@ stretch_mode = 0
 modulate = Color(1, 1, 1, 0)
 custom_minimum_size = Vector2(32, 32)
 layout_mode = 2
-size_flags_horizontal = 0
 tooltip_text = "Delete message"
 mouse_filter = 2
 texture_normal = ExtResource("4_fo1ca")
 texture_hover = ExtResource("5_o4qow")
 ignore_texture_size = true
 stretch_mode = 0
+
+[node name="UsageLabel" type="Label" parent="HBoxContainer" unique_id=1354334905]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 18
+horizontal_alignment = 2

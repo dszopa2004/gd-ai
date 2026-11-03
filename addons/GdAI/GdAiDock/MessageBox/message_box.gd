@@ -9,6 +9,7 @@ signal delete_requested(message: MessageBox)
 @export var delete_button : BaseButton
 @export var bubble: PanelContainer # inner bubble in the reworked scene; null in the legacy scene
 @export var segments: VBoxContainer # segment host; null until the scene adds it (legacy label path meanwhile)
+@export var usage_label: Label
 
 static var _bubble_warned := false
 
@@ -25,6 +26,7 @@ const CODE_RADIUS := 6
 const CODE_BORDER := Color(1, 1, 1, 0.09)
 
 var _pending_text := ""
+var _usage: Dictionary = {}
 var _copy_visible := false
 var _copy_hover := false
 var _hover := false
@@ -78,6 +80,7 @@ func _ready() -> void:
 	_apply_flat() # set_flat may have run before exports resolved
 	_apply_copy_visibility()
 	_apply_delete_visibility()
+	_apply_usage()
 
 
 func set_message_text(text: String) -> void:
@@ -410,6 +413,39 @@ func _apply_delete_visibility() -> void:
 
 func is_delete_shown() -> bool:
 	return _delete_shown
+
+
+# Per-turn token usage, shown under AI responses once the turn completes.
+# Hidden until set (user messages never set it).
+func set_usage(prompt_tokens: int, completion_tokens: int) -> void:
+	_usage = {"prompt": prompt_tokens, "completion": completion_tokens}
+	_apply_usage()
+
+
+func get_usage() -> Dictionary:
+	return _usage
+
+
+func _apply_usage() -> void:
+	if usage_label == null:
+		return
+	if _usage.is_empty():
+		usage_label.visible = false
+		return
+	usage_label.text = format_usage(int(_usage.get("prompt", 0)), int(_usage.get("completion", 0)))
+	usage_label.visible = true
+
+
+static func format_usage(prompt_tokens: int, completion_tokens: int) -> String:
+	return "%s in · %s out" % [_fmt_k(prompt_tokens), _fmt_k(completion_tokens)]
+
+
+static func _fmt_k(n: int) -> String:
+	if n < 1000:
+		return str(n)
+	if n % 1000 == 0:
+		return "%dk" % (n / 1000)
+	return "%.1fk" % (float(n) / 1000.0)
 
 
 func _on_delete_pressed() -> void:
