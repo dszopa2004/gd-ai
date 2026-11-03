@@ -37,6 +37,11 @@ extends Control
 @export var sign_in_cancel_button: Button
 @export var sign_out_button: Button # stacked with sign_in_button; visibility swaps by session
 
+@export_category("Unsaved Changes Popup")
+@export var unsaved_changes_container : PanelContainer
+@export var save_changes_button : Button 
+@export var exit_without_save_button : Button
+
 
 const MESSAGE_BOX_SCENE := preload("res://addons/GdAI/GdAiDock/MessageBox/MessageBox.tscn")
 const BUBBLE_RATIO := 1.0
@@ -69,6 +74,7 @@ var _loop_generation := 0 # user-message stamp; an approval from an older genera
 var _continue_button = null # live Continue button, if a capped turn is resumable
 var _continue_generation := -1 # user-message stamp the live Continue button belongs to
 var _sign_in_uri := "" # verification URL for the in-flight device flow (step 2)
+var _pending_tab := "" # tab waiting behind the unsaved-changes popup ("chat"/"history"); "" when none
 
 func _ready() -> void:
 	if Engine.is_editor_hint() and get_tree() != null and get_tree().edited_scene_root == self:
@@ -110,6 +116,7 @@ func _ready() -> void:
 	client.load_config()
 	max_loop_turns = _load_loop_cap()
 	_setup_settings_ui()
+	_setup_unsaved_popup()
 	_setup_sign_in_ui()
 	_update_session_status()
 	if client.session_is_stale():
@@ -126,6 +133,12 @@ func _ready() -> void:
 
 # Signal for chat button press
 func _on_chat_button_pressed() -> void:
+	if not _confirm_leave_settings("chat"):
+		return
+	_show_chat_tab()
+
+
+func _show_chat_tab() -> void:
 	chat_button.button_pressed = true
 	chat_menu.visible = true
 	history_menu.visible = false
@@ -814,6 +827,13 @@ func _update_input_height() -> void:
 
 # Signal for history button press
 func _on_history_button_pressed() -> void:
+	if not _confirm_leave_settings("history"):
+		return
+	_show_history_tab()
+
+
+func _show_history_tab() -> void:
+	history_button.button_pressed = true
 	history_menu.visible = true
 	chat_menu.visible = false
 	settings_menu.visible = false
@@ -973,6 +993,9 @@ static func _load_loop_cap() -> int:
 
 # Handle settings button press
 func _on_settings_button_pressed() -> void:
+	_cancel_pending_tab() # staying on Settings answers the popup: drop any pending switch
+	if settings_menu != null and settings_menu.visible:
+		return # already viewing Settings: keep unsaved edits instead of re-syncing
 	settings_menu.visible = true
 	history_menu.visible = false
 	chat_menu.visible = false
@@ -1045,6 +1068,86 @@ func _on_settings_saved() -> void:
 	client.load_config()
 	_update_session_status()
 	_sync_settings_fields()
+
+
+# Unsaved-changes popup: leaving the Settings tab with unapplied edits
+# parks the switch behind the popup instead of dropping the edits.
+func _setup_unsaved_popup() -> void:
+	if unsaved_changes_container != null:
+		unsaved_changes_container.visible = false
+	else:
+		push_warning("[GdAI] Unsaved-changes popup export is unassigned.")
+	if save_changes_button != null:
+		save_changes_button.pressed.connect(_on_save_changes_pressed)
+	else:
+		push_warning("[GdAI] Save-changes button export is unassigned.")
+	if exit_without_save_button != null:
+		exit_without_save_button.pressed.connect(_on_exit_without_save_pressed)
+	else:
+		push_warning("[GdAI] Exit-without-save button export is unassigned.")
+
+
+# Gate for tab switches out of Settings. Returns false when the switch must
+# wait behind the popup; the popup buttons complete it via _open_pending_tab.
+func _confirm_leave_settings(target: String) -> bool:
+	if settings_menu == null or not settings_menu.visible:
+		return true
+	if not _settings_have_unsaved_changes():
+		return true
+	if unsaved_changes_container == null:
+		return true # no popup wired; let the switch through
+	_pending_tab = target
+	if settings_button != null:
+		settings_button.button_pressed = true # stay visually on Settings while asking
+	unsaved_changes_container.visible = true
+	return false
+
+
+# Dirty check by comparing fields against saved values (no signal tracking,
+# so programmatic syncs can never falsely trip it).
+func _settings_have_unsaved_changes() -> bool:
+	if client == null:
+		return false
+	if api_key_field != null and not api_key_field.text.strip_edges().is_empty():
+		return true # the field is cleared on sync, so any text is unapplied
+	if endpoint_field != null and endpoint_field.text.strip_edges() != client.api_url.strip_edges():
+		return true
+	if model_picker != null and model_picker.selected >= 0:
+		if model_picker.get_item_text(model_picker.selected).strip_edges() != client.model.strip_edges():
+			return true
+	if loop_cap_spin != null and maxi(1, int(loop_cap_spin.value)) != max_loop_turns:
+		return true
+	return false
+
+
+# Popup: same save as the Settings tab, then open the selected tab.
+func _on_save_changes_pressed() -> void:
+	var target := _pending_tab
+	_cancel_pending_tab()
+	_on_settings_saved()
+	_open_pending_tab(target)
+
+
+# Popup: discard edits and just open the selected tab.
+func _on_exit_without_save_pressed() -> void:
+	var target := _pending_tab
+	_cancel_pending_tab()
+	_sync_settings_fields() # revert fields to saved values
+	_open_pending_tab(target)
+
+
+func _cancel_pending_tab() -> void:
+	_pending_tab = ""
+	if unsaved_changes_container != null:
+		unsaved_changes_container.visible = false
+
+
+func _open_pending_tab(target: String) -> void:
+	match target:
+		"chat":
+			_show_chat_tab()
+		"history":
+			_show_history_tab()
 
 
 # Phase 4 step 1: sign-in button + session status. The nodes live in the

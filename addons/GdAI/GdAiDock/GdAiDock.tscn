@@ -76,7 +76,14 @@ corner_radius_top_right = 10
 corner_radius_bottom_right = 10
 corner_radius_bottom_left = 10
 
-[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "loop_cap_spin", "sign_in_popup", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button")]
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_qq87m"]
+bg_color = Color(0.4045111, 0.40451118, 0.40451103, 1)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+
+[node name="GdAiDock" type="Control" unique_id=534673842 node_paths=PackedStringArray("chat_button", "history_button", "settings_button", "chat_menu", "history_menu", "chat_scroll", "message_list", "user_input_box", "send_button", "history_list", "new_chat_button", "settings_menu", "settings_save_button", "api_key_field", "endpoint_field", "model_picker", "loop_cap_spin", "sign_in_popup", "sign_in_button", "session_status_label", "sign_in_code_field", "sign_in_open_browser_button", "sign_in_cancel_button", "sign_out_button", "unsaved_changes_container", "save_changes_button", "exit_without_save_button")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -109,6 +116,9 @@ sign_in_code_field = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPane
 sign_in_open_browser_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer/OpenBrowserButton")
 sign_in_cancel_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/SignInPopup/MarginContainer/VBoxContainer/CancelSignInButton")
 sign_out_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/VBoxContainer/SettingsMenu/MarginContainer/VBoxContainer/ScrollContainer/SettingsBox/LoginContainer/SignoutButton")
+unsaved_changes_container = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup")
+save_changes_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup/MarginContainer/VBoxContainer/SaveButton")
+exit_without_save_button = NodePath("BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup/MarginContainer/VBoxContainer/ExitButton")
 
 [node name="BackgroundPanelContainer" type="PanelContainer" parent="." unique_id=943672050]
 layout_mode = 1
@@ -412,3 +422,40 @@ visible = false
 layout_mode = 2
 size_flags_horizontal = 4
 text = "Cancel Sign-in"
+
+[node name="UnsavedChangesPopup" type="PanelContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground" unique_id=1556212698]
+visible = false
+custom_minimum_size = Vector2(400, 240)
+layout_mode = 2
+size_flags_horizontal = 4
+size_flags_vertical = 4
+theme_override_styles/panel = SubResource("StyleBoxFlat_qq87m")
+
+[node name="MarginContainer" type="MarginContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup" unique_id=1760902983]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 10
+
+[node name="VBoxContainer" type="VBoxContainer" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup/MarginContainer" unique_id=481596817]
+layout_mode = 2
+
+[node name="UnsavedLabel" type="Label" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup/MarginContainer/VBoxContainer" unique_id=870445678]
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "You have unsaved changes! Would you like to save, or exit without saving?"
+horizontal_alignment = 1
+autowrap_mode = 3
+
+[node name="SaveButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup/MarginContainer/VBoxContainer" unique_id=2025834556]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+size_flags_vertical = 10
+text = "Save"
+
+[node name="ExitButton" type="Button" parent="BackgroundPanelContainer/VBoxContainer/OutputPanelBackground/UnsavedChangesPopup/MarginContainer/VBoxContainer" unique_id=1970727429]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+size_flags_vertical = 8
+text = "Exit without saving"
