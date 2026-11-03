@@ -105,7 +105,7 @@ The AI can act on your project, not just answer. Available tools:
 
 When approval is needed, an **Approve / Reject** card appears under the message — one click, no typing. Long tasks pause at the loop cap with a **Continue** button instead of running forever.
 
-> **Screenshot:** an approval card on a delete, and a Continue button on a capped turn.
+<img width="1300" height="621" alt="image" src="https://github.com/user-attachments/assets/970764fb-490d-4f95-a110-f493f3948427" />
 
 ### Attaching files with @
 
