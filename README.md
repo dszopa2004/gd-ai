@@ -2,7 +2,7 @@
 
 AI assistant for Godot, as an editor plugin. Chat with Meta's models to build scenes, edit nodes, and write scripts — changes apply directly in the editor with full undo support.
 
-<img width="384" height="328" alt="image" src="https://github.com/user-attachments/assets/88781321-19bf-46a6-9329-06d1d75e5281" />
+<img width="1304" height="421" alt="image" src="https://github.com/user-attachments/assets/6d5f55d7-8c22-4854-8798-b8060a39eeaf" />
 
 
 ## Features
